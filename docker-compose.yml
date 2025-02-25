@@ -1,0 +1,12 @@
+version: '3'
+
+services:
+  charlotte:
+    build: .
+    container_name: charlotte-bot
+    restart: unless-stopped
+    command: python charlotte_bot.py
+    volumes:
+      - ./:/home/kjh030529/Pycharm/Mizore_yolo_server/bot
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}

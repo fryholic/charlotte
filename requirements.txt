@@ -1,0 +1,28 @@
+aiohappyeyeballs @ file:///croot/aiohappyeyeballs_1732661981290/work
+aiohttp @ file:///croot/aiohttp_1725527756643/work
+aiosignal @ file:///tmp/build/80754af9/aiosignal_1637843061372/work
+attrs @ file:///croot/attrs_1729089401488/work
+awscrt==0.21.1
+awsiotsdk==1.22.0
+blinker @ file:///croot/blinker_1696539051175/work
+cffi==1.17.1
+click @ file:///croot/click_1698129812380/work
+cryptography==44.0.0
+discord.py==2.5.0
+ffmpeg==1.4
+Flask @ file:///croot/flask_1716545870149/work
+frozenlist @ file:///croot/frozenlist_1730902802621/work
+idna @ file:///croot/idna_1714398848350/work
+itsdangerous @ file:///croot/itsdangerous_1716533337253/work
+Jinja2 @ file:///croot/jinja2_1730902924303/work
+MarkupSafe @ file:///croot/markupsafe_1704205993651/work
+multidict @ file:///croot/multidict_1730905498140/work
+propcache @ file:///croot/propcache_1732303986938/work
+pycparser==2.22
+PyNaCl==1.5.0
+pyOpenSSL==24.3.0
+thinqconnect==1.0.1
+Werkzeug @ file:///croot/werkzeug_1731005776056/work
+yarl @ file:///croot/yarl_1732546845924/work
+yt-dlp==2025.2.19
+python-dotenv>=0.21.0
