@@ -7,6 +7,6 @@ services:
     restart: unless-stopped
     command: python charlotte_bot.py
     volumes:
-      - ./:/home/kjh030529/Pycharm/Mizore_yolo_server/bot
+      - ./:/app
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
