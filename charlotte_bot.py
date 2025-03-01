@@ -9,6 +9,12 @@ from dotenv import load_dotenv
 queues = {}
 text_channels = {}
 
+BLOCKED_USER_IDS = [
+    int(user_id.strip()) 
+    for user_id in os.getenv('BLOCKED_USER_IDS', '').split(',') 
+    if user_id.strip()
+]
+
 # YouTube 다운로드 설정 (오디오 추출 최적화)
 # ytdl_format_options = {
 #     'format': 'bestaudio/best',
@@ -81,6 +87,12 @@ bot = commands.Bot(command_prefix='?', intents=discord.Intents.all())
 async def on_ready():
     print(f'{bot.user.name}이 성공적으로 로그인!')
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="?help"))
+
+@bot.event
+async def on_message(message):
+    if message.author.id in BLOCKED_USER_IDS and message.content.startswith(bot.command_prefix):
+        return
+    await bot.process_commands(message)
 
 @bot.command(name='play')
 async def play(ctx, *, url):
