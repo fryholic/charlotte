@@ -11,8 +11,17 @@ from watchdog.events import FileSystemEventHandler
 queues = {}
 text_channels = {}
 
-BLOCKED_USER_IDS = list(map(int, os.getenv('BLOCKED_USER_IDS', '').split(',')))
+# 차단 목록 초기화
+raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
+BLOCKED_USER_IDS = []
+if raw_ids:
+    try:
+        BLOCKED_USER_IDS = [int(x.strip()) for x in raw_ids.split(',') if x.strip()]
+    except ValueError as e:
+        print(f"⚠️ 초기화 실패 - 잘못된 사용자 ID 형식: {e}")
+        BLOCKED_USER_IDS = []
 
+# 감시 핸들러
 class EnvFileHandler(FileSystemEventHandler):
     def __init__(self, bot):
         self.bot = bot
@@ -21,9 +30,20 @@ class EnvFileHandler(FileSystemEventHandler):
         if event.src_path.endswith('.env'):
             print("\n🔔 .env 파일 변경 감지!")
             load_dotenv(override=True)
-            new_ids = list(map(int, os.getenv('BLOCKED_USER_IDS', '').split(',')))
-            BLOCKED_USER_IDS.clear()
-            BLOCKED_USER_IDS.extend(new_ids)
+            
+            
+            raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
+            new_ids = []
+            if raw_ids: # 검증
+                try:
+                    new_ids = [int(x.strip()) for x in raw_ids.split(',') if x.strip()]
+                except ValueError as e:
+                    print(f"⚠️ 잘못된 사용자 ID 형식: {e}")
+                    return
+            
+            # 차단 목록 업데이트
+            global BLOCKED_USER_IDS
+            BLOCKED_USER_IDS = new_ids
             print(f"🔄 차단 목록 업데이트 완료: {BLOCKED_USER_IDS}")
 
 async def setup_file_watcher(bot):
