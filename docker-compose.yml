@@ -8,6 +8,7 @@ services:
     command: python charlotte_bot.py
     volumes:
       - ./:/app
+      - ./.env:/app/.env
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - BLOCKED_USER_IDS=${BLOCKED_USER_IDS}
