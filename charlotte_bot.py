@@ -4,10 +4,56 @@ import yt_dlp as youtube_dl
 import asyncio
 import os
 from dotenv import load_dotenv
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 
 # 각 서버별 큐와 채널 정보 저장
 queues = {}
 text_channels = {}
+
+# 차단 목록 초기화
+raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
+BLOCKED_USER_IDS = []
+if raw_ids:
+    try:
+        BLOCKED_USER_IDS = [int(x.strip()) for x in raw_ids.split(',') if x.strip()]
+    except ValueError as e:
+        print(f"⚠️ 초기화 실패 - 잘못된 사용자 ID 형식: {e}")
+        BLOCKED_USER_IDS = []
+
+# 감시 핸들러
+class EnvFileHandler(FileSystemEventHandler):
+    def __init__(self, bot):
+        self.bot = bot
+
+    def on_modified(self, event):
+        if event.src_path.endswith('.env'):
+            print("\n🔔 .env 파일 변경 감지!")
+            load_dotenv(override=True)
+            
+            
+            raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
+            new_ids = []
+            if raw_ids: # 검증
+                try:
+                    new_ids = [int(x.strip()) for x in raw_ids.split(',') if x.strip()]
+                except ValueError as e:
+                    print(f"⚠️ 잘못된 사용자 ID 형식: {e}")
+                    return
+            
+            # 차단 목록 업데이트
+            global BLOCKED_USER_IDS
+            BLOCKED_USER_IDS = new_ids
+            print(f"🔄 차단 목록 업데이트 완료: {BLOCKED_USER_IDS}")
+
+async def setup_file_watcher(bot):
+    observer = Observer()
+    event_handler = EnvFileHandler(bot)
+    observer.schedule(event_handler, path='/app', recursive=False)
+    observer.start()
+    print("✅ 파일 감시기 시작됨")
+    return observer
+
 
 # YouTube 다운로드 설정 (오디오 추출 최적화)
 # ytdl_format_options = {
@@ -80,7 +126,22 @@ bot = commands.Bot(command_prefix='?', intents=discord.Intents.all())
 @bot.event
 async def on_ready():
     print(f'{bot.user.name}이 성공적으로 로그인!')
+    bot.file_observer = await setup_file_watcher(bot)
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="?help"))
+
+@bot.event
+async def on_message(message):
+    if message.author.id in BLOCKED_USER_IDS and message.content.startswith(bot.command_prefix):
+        print(f"차단된 사용자 : {message.author.id}")
+        return
+    await bot.process_commands(message)
+
+@bot.event
+async def close(self):
+    if hasattr(self, 'file_observer'):
+        self.file_observer.stop()
+        self.file_observer.join()
+    await super().close()
 
 @bot.command(name='play')
 async def play(ctx, *, url):
