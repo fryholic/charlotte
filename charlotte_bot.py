@@ -259,6 +259,18 @@ async def on_command_error(ctx, error):
     else:
         print(f'오류 발생: {error}')
 
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.guild.id in queues and member.voice.channel is not None:
+        if member.voice.self_mute and member.id not in BLOCKED_USER_IDS:
+            dm = await member.create_dm()
+            await dm.send(file=discord.File('charlotte_warn.png'))
+            await dm.send("🔇 마이크를 껐습니다. 10초 이내로 다시 켜지 않으면 음성 채널에서 내보냅니다.")
+            await asyncio.sleep(10)
+            if member.voice.self_mute:
+                await member.move_to(None)
+                await dm.send(file=discord.File('charlotte_kick.png'))
+                await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
 
 load_dotenv
 
