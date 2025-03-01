@@ -10,3 +10,4 @@ services:
       - ./:/app
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - BLOCKED_USER_IDS=${BLOCKED_USER_IDS}
