@@ -269,7 +269,7 @@ async def on_voice_state_update(member, before, after):
             await asyncio.sleep(10000)
             if member.voice.self_mute:
                 await member.move_to(None)
-                await dm.send(file=discord.File('./img/charlotte_kick.png'))
+                await dm.send(file=discord.File('./img/charlotte_kick.gif'))
                 await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
 
 load_dotenv
