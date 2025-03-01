@@ -6,9 +6,13 @@ services:
     container_name: charlotte-bot
     restart: unless-stopped
     command: python charlotte_bot.py
+    #volumes:
+      #- ./:/app
+      #- ./.env:/app/.env
     volumes:
-      - ./:/app
-      - ./.env:/app/.env
+      - type: bind
+        source: /home/mizore/charlotte/
+        target: /app  
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - BLOCKED_USER_IDS=${BLOCKED_USER_IDS}
