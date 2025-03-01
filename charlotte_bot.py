@@ -49,7 +49,7 @@ class EnvFileHandler(FileSystemEventHandler):
 async def setup_file_watcher(bot):
     observer = Observer()
     event_handler = EnvFileHandler(bot)
-    observer.schedule(event_handler, path='.', recursive=False)
+    observer.schedule(event_handler, path='/app', recursive=False)
     observer.start()
     print("✅ 파일 감시기 시작됨")
     return observer
