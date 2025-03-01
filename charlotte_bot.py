@@ -266,7 +266,7 @@ async def on_voice_state_update(member, before, after):
             dm = await member.create_dm()
             await dm.send(file=discord.File('./img/charlotte_warn.png'))
             await dm.send("🔇 마이크를 껐습니다. 10초 이내로 다시 켜지 않으면 음성 채널에서 내보냅니다.")
-            await asyncio.sleep(10000)
+            await asyncio.sleep(10)
             if member.voice.self_mute:
                 await member.move_to(None)
                 await dm.send(file=discord.File('./img/charlotte_kick.gif'))
