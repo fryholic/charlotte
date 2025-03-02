@@ -93,9 +93,8 @@ ytdl_format_options = {
 
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -b:a 320k -ac 2 -ar 48000'  # 네트워크 재연결 옵션 추가
+    'options': '-vn -b:a 320k -ac 2 -ar 48000 -af loudnorm=I=-11:TP=-1.5:LRA=11'  # 네트워크 재연결 옵션 추가
 }
-
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 
