@@ -101,7 +101,7 @@ ytdl_format_options = {
 # }
 
 ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -http_persistent 1 -multiple_requests 1 -cert_pin 0 -ignore_io_errors 1',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -http_persistent 1 -multiple_requests 1 -ignore_io_errors 1',
     'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
 }
 
