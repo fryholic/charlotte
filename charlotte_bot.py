@@ -1,3 +1,9 @@
+import io
+import math
+from datetime import datetime
+import requests
+from discord import File
+import matplotlib.pyplot as plt
 import discord
 from discord.ext import commands
 import yt_dlp as youtube_dl
@@ -280,7 +286,239 @@ async def on_voice_state_update(member, before, after):
                 await dm.send(file=discord.File('./img/charlotte_kick.gif'))
                 await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
 
-load_dotenv
+@bot.command(name='er')
+async def er_stat(ctx, player_id: str):
+    """
+    에터널 리턴 전적 조회 (?er [플레이어 아이디])
+    + 한글 폰트 / RP 그래프 데이터 없는 날짜 생략 개선
+    """
+    # ---------------------------------------
+    # 1) 티어 목록 가져오기
+    # ---------------------------------------
+    tiers_url = "https://er.dakgg.io/api/v1/data/tiers?hl=ko"
+    try:
+        tiers_resp = requests.get(tiers_url, timeout=10)
+        tiers_data = tiers_resp.json()
+    except Exception as e:
+        await ctx.send(f"❌ 티어 목록 API 요청 실패: {e}")
+        return
+
+    # tier_id -> dict("name", "icon", "image")
+    tier_info_map = {}
+    for t in tiers_data.get("tiers", []):
+        t_id = t.get("id")
+        t_name = t.get("name")
+        t_icon = t.get("iconUrl")
+        t_image = t.get("imageUrl")
+        if t_icon and t_icon.startswith("//"):
+            t_icon = "https:" + t_icon
+        if t_image and t_image.startswith("//"):
+            t_image = "https:" + t_image
+        tier_info_map[t_id] = {
+            "name": t_name,
+            "icon": t_icon,
+            "image": t_image
+        }
+
+    # ---------------------------------------
+    # 2) 플레이어 프로필 가져오기
+    # ---------------------------------------
+    profile_url = f"https://er.dakgg.io/api/v1/players/{player_id}/profile"
+    try:
+        resp = requests.get(profile_url, timeout=10)
+        if resp.status_code != 200:
+            await ctx.send(f"❌ 프로필 API 오류 (HTTP {resp.status_code}) - 플레이어를 찾을 수 없습니다.")
+            return
+    except Exception as e:
+        await ctx.send(f"❌ 프로필 API 요청 실패: {e}")
+        return
+
+    data = resp.json()
+
+    # 현재 시즌 판단
+    meta_season_str = data.get("meta", {}).get("season", "")  # e.g. "SEASON_15"
+    season_id_map = {
+        "SEASON_15": 29,
+        # 필요 시 확장...
+    }
+    current_season_id = season_id_map.get(meta_season_str, None)
+    if not current_season_id:
+        await ctx.send("❌ 현재 시즌 정보를 찾지 못했습니다.")
+        return
+
+    # playerSeasonOverviews에서 RANK 스쿼드(matchingModeId=3, teamModeId=3) 데이터 찾기
+    target_record = None
+    for season_obj in data.get("playerSeasonOverviews", []):
+        if (season_obj.get("seasonId") == current_season_id
+            and season_obj.get("matchingModeId") == 3
+            and season_obj.get("teamModeId") == 3):
+            target_record = season_obj
+            break
+
+    if not target_record:
+        await ctx.send("❓ 해당 플레이어의 RANK(스쿼드) 데이터가 없습니다.")
+        return
+
+    # ---------------------------------------
+    # 3) 전적 파싱
+    # ---------------------------------------
+    tier_id = target_record.get("tierId", 0)
+    tier_grade_id = target_record.get("tierGradeId", 0)
+    mmr = target_record.get("mmr", 0)
+    tier_mmr = target_record.get("tierMmr", 0)
+
+    # 티어명, 아이콘
+    tier_name = tier_info_map.get(tier_id, {}).get("name", "언랭크")
+    tier_icon = tier_info_map.get(tier_id, {}).get("icon")  # round 아이콘
+    detail_tier = f"{tier_name} {tier_grade_id} - {tier_mmr} RP" if tier_name != "언랭크" else "언랭"
+
+    # 글로벌/지역 랭킹
+    global_rank_data = target_record.get("rank", {}).get("global", {})
+    local_rank_data = target_record.get("rank", {}).get("local", {})
+
+    global_rank = global_rank_data.get("rank", 0)
+    global_size = global_rank_data.get("rankSize", 1)
+    global_percent = (global_rank / global_size * 100) if global_size else 0
+
+    local_rank_val = local_rank_data.get("rank", 0)
+    local_size = local_rank_data.get("rankSize", 1)
+    local_percent = (local_rank_val / local_size * 100) if local_size else 0
+
+    # 전적 계산
+    def safe_div(a, b):
+        return a / b if b else 0
+
+    play = target_record.get("play", 0)
+    win = target_record.get("win", 0)
+    top2 = target_record.get("top2", 0)
+    top3 = target_record.get("top3", 0)
+    place_sum = target_record.get("place", 0)
+    kills = target_record.get("playerKill", 0)
+    assists = target_record.get("playerAssistant", 0)
+    team_kills = target_record.get("teamKill", 0)
+    damage = target_record.get("damageToPlayer", 0)
+
+    wr = safe_div(win, play) * 100
+    avg_kill = safe_div(kills, play)
+    avg_assist = safe_div(assists, play)
+    avg_damage = safe_div(damage, play)
+    avg_team_kill = safe_div(team_kills, play)
+    top2_rate = safe_div(top2, play) * 100
+    top3_rate = safe_div(top3, play) * 100
+    avg_rank = safe_div(place_sum, play)
+
+    def fmt(v, digit=2):
+        return f"{v:.{digit}f}"
+
+    # ---------------------------------------
+    # 4) RP 그래프(데이터 없는 날짜 생략)
+    # ---------------------------------------
+    mmr_stats = target_record.get("mmrStats", [])
+    # 예: [[20250203,1892,1787,1892],[20250202,1807,1598,1807], ...]
+
+    # X축: 0, 1, 2, ... (데이터 길이만큼 등간격)
+    # Ticks는 strftime("%y-%m-%d") 등으로 표현
+    x_values = []
+    x_labels = []
+    y_values = []
+
+    for row in mmr_stats:
+        if len(row) < 2:
+            continue
+        date_yyyymmdd = str(row[0])  # e.g. "20250203"
+        mmr_val = row[-1]
+
+        try:
+            y = int(date_yyyymmdd[:4])
+            m = int(date_yyyymmdd[4:6])
+            d = int(date_yyyymmdd[6:8])
+            date_obj = datetime(y, m, d)
+            # x_values 배열 길이
+            idx = len(x_values)
+            x_values.append(idx)
+            x_labels.append(date_obj.strftime("%y-%m-%d"))
+            y_values.append(mmr_val)
+        except:
+            pass
+
+    COLOR = 'white'
+    plt.rcParams['text.color'] = COLOR
+    plt.rcParams['axes.labelcolor'] = COLOR
+    plt.rcParams['xtick.color'] = COLOR
+    plt.rcParams['ytick.color'] = COLOR
+
+    plt.rcParams['axes.edgecolor'] = 'none'
+
+    # 그래프 그리기 (등간격)
+    fig, ax = plt.subplots(figsize=(6, 4))  # 그림 크기는 상황에
+    fig.patch.set_facecolor('none')
+    ax.set_facecolor('none')
+
+    ax.invert_xaxis()
+    if x_values and y_values:
+        ax.plot(x_values, y_values, color=COLOR, marker='o')
+
+        # X축 눈금 = x_values, 라벨 = x_labels
+        ax.set_xticks(x_values)
+        ax.set_xticklabels(x_labels, rotation=45)
+    else:
+        ax.text(0.5, 0.5, "RP 데이터 없음", ha='center', va='center', transform=ax.transAxes)
+
+    plt.tight_layout()
+
+    # PNG로 버퍼 저장
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=100)
+    buf.seek(0)
+    plt.close(fig)
+
+    file = File(buf, filename="mmr_stats.png")
+
+    # ---------------------------------------
+    # 5) 임베드 전송
+    # ---------------------------------------
+    embed = discord.Embed(
+        title="이터널 리턴 전적",
+        description=(
+            f"**플레이어:** {player_id}\n"
+            f"**티어:** {tier_name}\n"
+            f"**MMR(RP):** {mmr} RP\n"
+        ),
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="세부 티어", value=detail_tier, inline=True)
+
+    if tier_icon:
+        embed.set_thumbnail(url=tier_icon)
+
+    embed.add_field(
+        name="글로벌 랭킹",
+        value=f"{global_rank:,}위 (상위 {fmt(global_percent)}%)",
+        inline=False
+    )
+    embed.add_field(
+        name="지역 랭킹",
+        value=f"{local_rank_val:,}위 (상위 {fmt(local_percent)}%)",
+        inline=False
+    )
+
+    embed.add_field(name="게임 수", value=str(play), inline=True)
+    embed.add_field(name="승률", value=f"{fmt(wr)}%", inline=True)
+    embed.add_field(name="평균 TK", value=fmt(avg_team_kill), inline=True)
+
+    embed.add_field(name="평균 킬", value=fmt(avg_kill), inline=True)
+    embed.add_field(name="평균 어시", value=fmt(avg_assist), inline=True)
+    embed.add_field(name="평균 딜량", value=f"{math.floor(avg_damage):,}", inline=True)
+
+    embed.add_field(name="TOP 2", value=f"{fmt(top2_rate)}%", inline=True)
+    embed.add_field(name="TOP 3", value=f"{fmt(top3_rate)}%", inline=True)
+    embed.add_field(name="평균 순위", value=fmt(avg_rank, 1), inline=True)
+
+    embed.set_image(url="attachment://mmr_stats.png")
+
+    await ctx.send(file=file, embed=embed)
+
+load_dotenv()
 
 # 봇 토큰 설정
 if __name__ == "__main__":
