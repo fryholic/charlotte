@@ -80,6 +80,10 @@ ytdl_format_options = {
     'quiet': True,
     'no_warnings': True,
     'extract_flat': 'in_playlist',
+    'http_headers': {  # 헤더 추가로 차단 방지
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    },
     'postprocessors': [{ 
         'key': 'FFmpegExtractAudio',
         'preferredcodec': 'opus',  # OPUS 코덱 사용으로 변경
@@ -91,9 +95,14 @@ ytdl_format_options = {
 #     'options': '-vn -loglevel quiet -ab 320'  # 오디오 정규화 추가 -af dynaudnorm
 # }
 
+# ffmpeg_options = {
+#     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+#     'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'  # 네트워크 재연결 옵션 추가
+# }
+
 ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'  # 네트워크 재연결 옵션 추가
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -http_persistent 1 -multiple_requests 1 -cert_pin 0 -ignore_io_errors 1',
+    'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
 }
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
