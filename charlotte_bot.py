@@ -82,9 +82,9 @@ ytdl_format_options = {
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
-    'ignoreerrors': True,
-    'quiet': True,
-    'no_warnings': True,
+    'ignoreerrors': False,
+    'quiet': False,
+    'no_warnings': False,
     'extract_flat': 'in_playlist',
     'http_headers': {  # 헤더 추가로 차단 방지
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -107,7 +107,7 @@ ytdl_format_options = {
 # }
 
 ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin -http_persistent 1 -multiple_requests 1 -ignore_io_errors 1',
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
 }
 
