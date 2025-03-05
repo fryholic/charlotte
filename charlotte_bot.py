@@ -270,7 +270,7 @@ async def on_voice_state_update(member, before, after):
 @bot.command(name='er')
 async def er_stat(ctx, player_id: str):
     """
-    이터널 리턴 전적 조회 (?er [플레이어 아이디])
+    이터널리턴 전적 조회 (?er [플레이어 아이디])
     + 한글 폰트 / RP 그래프 데이터 없는 날짜 생략 개선
     """
     # 이하 동일
@@ -425,7 +425,7 @@ async def er_stat(ctx, player_id: str):
     file = File(buf, filename="mmr_stats.png")
 
     embed = discord.Embed(
-        title="이터널 리턴 전적",
+        title="이터널리턴 전적",
         description=(
             f"**플레이어:** {player_id}\n"
             f"**티어:** {tier_name}\n"
