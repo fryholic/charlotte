@@ -3,7 +3,6 @@ import asyncio
 import discord
 
 from AudioScheduler import AudioScheduler
-from charlotte_bot import bot
 
 
 class ServerClient:

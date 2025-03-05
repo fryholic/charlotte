@@ -1,9 +1,35 @@
 import asyncio
 
 import discord
+import yt_dlp as youtube_dl
 
-from charlotte_bot import ffmpeg_options, ytdl
-
+# -----------------------------------------
+# 유튜브 다운로드 설정
+# -----------------------------------------
+ytdl_format_options = {
+    'format': 'bestaudio/best',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'quiet': False,
+    'no_warnings': False,
+    'extract_flat': 'in_playlist',
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    },
+    'postprocessors': [{
+        'key': 'FFmpegExtractAudio',
+        'preferredcodec': 'opus',
+        'preferredquality': '320',
+    }],
+}
+ffmpeg_options = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
+}
+ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 
 class TrackFactory(discord.FFmpegOpusAudio):
     def __init__(self, source, *, data):
