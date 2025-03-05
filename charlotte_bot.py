@@ -6,7 +6,6 @@ from discord import File
 import matplotlib.pyplot as plt
 import discord
 from discord.ext import commands
-import yt_dlp as youtube_dl
 import asyncio
 import os
 from dotenv import load_dotenv
@@ -59,34 +58,6 @@ async def setup_file_watcher(bot):
     observer.start()
     print("✅ 파일 감시기 시작됨")
     return observer
-
-# -----------------------------------------
-# 유튜브 다운로드 설정
-# -----------------------------------------
-ytdl_format_options = {
-    'format': 'bestaudio/best',
-    'restrictfilenames': True,
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'quiet': False,
-    'no_warnings': False,
-    'extract_flat': 'in_playlist',
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    },
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'opus',
-        'preferredquality': '320',
-    }],
-}
-ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
-}
-ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 
 # -----------------------------------------
 # 봇 및 클라이언트 관리
