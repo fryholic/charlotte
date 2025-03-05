@@ -13,6 +13,9 @@ from dotenv import load_dotenv
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
+from Modules.ServerClient import ServerClient
+from Modules.TrackFactory import TrackFactory
+
 # 차단 목록 초기화
 raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
 BLOCKED_USER_IDS = []
@@ -22,125 +25,6 @@ if raw_ids:
     except ValueError as e:
         print(f"⚠️ 초기화 실패 - 잘못된 사용자 ID 형식: {e}")
         BLOCKED_USER_IDS = []
-
-# -----------------------------------------
-# 오디오 스케줄러
-# -----------------------------------------
-class AudioScheduler:
-    def __init__(self):
-        self.queues = []
-        self.text_channel = None
-        self.playing_message = None
-        return
-
-    def enqueue(self, track):
-        self.queues.append(track)
-        print(f"🎵 대기열 추가: {track.title}")
-        return track
-
-    def enqueue_list(self, tracks):
-        self.queues.extend(tracks)
-        print(f"🎵 대기열 추가: {len(tracks)}곡")
-        return tracks
-
-    def clear(self):
-        self.queues.clear()
-        print("🎵 대기열 초기화")
-        return
-
-    def dequeue(self):
-        if not self.is_empty():
-            removed = self.queues.pop(0)
-            print(f"🎵 대기열 삭제: {removed.title}")
-            return removed
-        return None
-
-    def clone(self):
-        return self.queues.copy()
-
-    def is_empty(self):
-        return len(self.queues) == 0
-
-    def __len__(self):
-        return len(self.queues)
-
-    def __iter__(self):
-        return iter(self.queues)
-
-    def __del__(self):
-        self.clear()
-        print("🔚 오디오 스케줄러 삭제")
-        return
-
-# -----------------------------------------
-# 서버 클라이언트
-# -----------------------------------------
-class ServerClient:
-    def __init__(self, server_id):
-        self.server_id = server_id
-        self.voice_client: discord.VoiceClient = None
-        self.audio_scheduler = AudioScheduler()
-        return
-
-    async def join_voice_channel(self, channel: discord.VoiceChannel):
-        """
-        해당 음성 채널에 접속하거나, 이미 연결되어 있다면 이동.
-        """
-        if not self.voice_client or not self.voice_client.is_connected():
-            self.voice_client = await channel.connect()
-        elif self.voice_client.channel != channel:
-            await self.voice_client.move_to(channel)
-        print(f"🔊 음성 채널 연결: {channel.name}")
-        return self.voice_client
-
-    async def leave_voice_channel(self):
-        if self.voice_client and self.voice_client.is_connected():
-            await self.voice_client.disconnect()
-            self.voice_client = None
-            print("🔇 음성 채널 연결 해제")
-        return
-
-    def __del__(self):
-        if self.voice_client:
-            asyncio.run_coroutine_threadsafe(self.voice_client.disconnect(), bot.loop)
-        print("🔚 서버 클라이언트 삭제")
-        return
-
-# -----------------------------------------
-# MusicPlayer (재생 소스)
-# -----------------------------------------
-class MusicPlayer(discord.FFmpegOpusAudio):
-    def __init__(self, source, *, data):
-        super().__init__(
-            source,
-            **ffmpeg_options
-        )
-        self.data = data
-        self.title = data.get('title')
-        self.url = data.get('url')
-
-    @classmethod
-    async def from_url(cls, url, *, loop=None):
-        loop = loop or asyncio.get_event_loop()
-        try:
-            data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-
-            # 플레이리스트 형태일 경우 entries 여러 개
-            entries = data.get('entries', [])
-            if entries:
-                # 여러 곡이 들어있다면, 각각 MusicPlayer 인스턴스 만들기
-                ret = []
-                for entry in entries:
-                    if 'url' not in entry:
-                        continue
-                    ret.append(cls(entry['url'], data=entry))
-                return ret
-            else:
-                # 단일 곡
-                return [cls(data['url'], data=data)]
-        except Exception as e:
-            print(f"Error: {e}")
-            return []
 
 # -----------------------------------------
 # 파일 변경 감지 핸들러
@@ -305,7 +189,7 @@ async def play(ctx, *, url):
 
     # 곡 로드
     async with ctx.typing():
-        players = await MusicPlayer.from_url(url, loop=bot.loop)
+        players = await TrackFactory.from_url(url, loop=bot.loop)
         if not players:
             return await ctx.send("⚠️ 재생할 수 있는 콘텐츠를 찾지 못했습니다!")
 
