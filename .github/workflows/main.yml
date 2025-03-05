@@ -29,6 +29,8 @@ jobs:
             git pull
 
             echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker compose down
-            echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker compose build --pull
+            # 캐싱을 위해 최신화 비활성화
+            # echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker compose build --pull
             echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker compose up -d
-            echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker image prune -af
+            # 캐싱을 위해 이전 이미지 제거 비활성화
+            # echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker image prune -af
