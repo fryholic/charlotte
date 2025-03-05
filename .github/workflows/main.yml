@@ -28,7 +28,7 @@ jobs:
             # 필요하다면 로컬에서 이미 clone 되어있는 레포를 pull
             git pull
 
-            echo "${{ secrets.SERVER_SUDO_PASS }}" | sudo -S docker compose down
-            echo "${{ secrets.SERVER_SUDO_PASS }}" | sudo -S docker compose build --pull
-            echo "${{ secrets.SERVER_SUDO_PASS }}" | sudo -S docker compose up -d
-            echo "${{ secrets.SERVER_SUDO_PASS }}" | sudo -S docker image prune -af
+            echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker compose down
+            echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker compose build --pull
+            echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker compose up -d
+            echo "${{ secrets.SERVER_SSH_KEY }}" | sudo -S docker image prune -af
