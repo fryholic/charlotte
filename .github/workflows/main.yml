@@ -1,0 +1,41 @@
+name: Deploy to server.kiba.red
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+      # 모든 태그에 대해 동작하려면 - '*' 로 작성 가능
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v2
+
+      - name: Deploy Bot
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}       # server.kiba.red
+          username: ${{ secrets.SERVER_USER }}   # SSH 접속 사용자
+          key: ${{ secrets.SERVER_SSH_KEY }}     # SSH 개인 키
+          port: 22                               # 기본: 22
+          script: |
+            # 배포 디렉토리 이동
+            cd /home/charlotte
+
+            # 필요하다면 로컬에서 이미 clone 되어있는 레포를 pull
+            git pull
+
+            # 구버전 컨테이너 정리
+            sudo docker compose down
+
+            # 최신 이미지 빌드
+            sudo docker compose build --pull
+
+            # 새 컨테이너 실행(백그라운드)
+            sudo docker compose up -d
+
+            # 안 쓰는 이미지 정리(옵션)
+            sudo docker image prune -af
