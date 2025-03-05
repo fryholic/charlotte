@@ -165,14 +165,15 @@ async def play(ctx, *, url):
             return await ctx.send("⚠️ 재생할 수 있는 콘텐츠를 찾지 못했습니다!")
 
         # 큐에 추가
-        await client.audio_scheduler.enqueue_list(players)
+        client.audio_scheduler.enqueue_list(players)
 
         # 사용자에게 알림
         added_titles = "\n".join([f"- {p.title}" for p in players])
         await ctx.send(f"**🎶 {len(players)}곡 추가됨:**\n{added_titles}")
 
     # 만약 현재 재생중이 아니라면 다음 곡 재생
-    await play_next(ctx.guild)
+    if not client.voice_client.is_playing():
+        await play_next(ctx.guild)
 
 @bot.command(name='skip')
 async def skip(ctx):
