@@ -383,7 +383,11 @@ async def er_stat(ctx, player_id: str):
     for row in mmr_stats:
         if len(row) < 2:
             continue
+
+        if len(x_values) >= 15:
+            break
         date_yyyymmdd = str(row[0])
+
         mmr_val = row[-1]
 
         try:
