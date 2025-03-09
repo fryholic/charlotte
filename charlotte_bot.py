@@ -1,17 +1,20 @@
+import asyncio
 import io
 import math
+import os
 from datetime import datetime
+
+import discord
+import matplotlib.pyplot as plt
 import requests
 from discord import File
-import matplotlib.pyplot as plt
-import discord
 from discord.ext import commands
-import asyncio
-import os
 from dotenv import load_dotenv
-from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
+from Modules.KonglishResolver import convert_mixed_string, english_ratio_excluding_code_and_urls
+from Modules.LanguageResearcher import detect_text_type
 from Modules.ServerClient import ServerClient
 from Modules.TrackFactory import TrackFactory
 
@@ -78,7 +81,6 @@ async def on_ready():
 
     print("🔊 서버 클라이언트 초기화 완료")
 
-
 @bot.event
 async def on_guild_join(guild):
     if guild.id not in clients:
@@ -93,6 +95,17 @@ async def on_message(message):
         print(f"차단된 사용자 : {message.author.id}")
         return
     await bot.process_commands(message)
+
+    # 문자열의 시작이 명령어 접두사가 아닐경우에만, 봇 또는 자기 자신이 입력한 메시지가 아닌 경우에만 실행
+    if not message.content.startswith(bot.command_prefix) and message.author != bot.user and not message.author.bot:
+        eng_distribution = english_ratio_excluding_code_and_urls(message.content)
+        if eng_distribution < 0.7:
+            return
+
+        korean_scale = detect_text_type(message.content)["korean_scale"]
+        if korean_scale > 0.9:
+            resolved_message = convert_mixed_string(message.content)
+            await message.channel.send(resolved_message)
 
 
 @bot.event
