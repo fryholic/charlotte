@@ -36,6 +36,19 @@ FFMPEG_OPTIONS = {
      'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
 }
 
+FFMPEG_OPTIONS_MEMORYAUDIOSOURCE = {
+    'before_options': (
+        '-vn '           # 비디오 스트림 무시
+        '-loglevel warning '
+        '-report'
+    ),
+    'options': (
+        '-c:a libopus '  # 오디오 코덱 지정
+        '-b:a 320k '     # 비트레이트 설정
+        '-ar 48000 '     # 샘플 레이트 강제 지정
+    )
+}
+
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 
 class YouTubeSource(discord.FFmpegOpusAudio):
@@ -71,9 +84,7 @@ class YouTubeSource(discord.FFmpegOpusAudio):
 
 class MemoryAudioSource(discord.FFmpegOpusAudio):
     def __init__(self, buffer, metadata, *, bitrate=320):
-        print(f"[1] 버퍼 타입: {type(buffer)}")
         self.buffer = buffer
-        print(f"[2] buffer 할당 완료: {hasattr(self, 'buffer')}")
         self.metadata = metadata
         self.title = metadata.get('title', 'Unknown')
 
@@ -82,9 +93,8 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
                 buffer,
                 pipe=True,
                 bitrate=bitrate,
-                **FFMPEG_OPTIONS
+                **FFMPEG_OPTIONS_MEMORYAUDIOSOURCE
             )
-            print("[3] 부모 클래스 초기화 성공")
         except Exception as e:
             print(f"❗ 부모 클래스 초기화 실패: {str(e)}")
             self.buffer.close()

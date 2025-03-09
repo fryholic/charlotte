@@ -20,7 +20,6 @@ def get_cookie(quality='320'):
 
         response = _SESSION.get('https://spotisongdownloader.to/', headers=headers)
         print(f"Cookie Status: {response.status_code}")
-        debug_response(response)
         
         cookies = _SESSION.cookies.get_dict()
         return f"PHPSESSID={cookies.get('PHPSESSID', '')}; quality={quality}"
@@ -72,8 +71,6 @@ def get_data(link):
         )
         
         print(f"[DEBUG] GET Data Status: {response.status_code}")
-        print(f"[DEBUG] Response Headers: {response.headers}")
-        print(f"[DEBUG] Response Content Sample: {response.text[:200]}...")
 
         response.raise_for_status()
         return response.json()
