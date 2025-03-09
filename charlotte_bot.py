@@ -143,7 +143,7 @@ async def play_next(guild: discord.Guild):
 
 
 @bot.command(name='play')
-async def play(ctx, *, url):
+async def play(ctx, *, url=None):
     """음악 재생 명령어"""
     if not ctx.author.voice:
         return await ctx.send("먼저 음성 채널에 접속해 주세요!")
@@ -158,18 +158,35 @@ async def play(ctx, *, url):
     # 텍스트 채널 기억
     client.audio_scheduler.text_channel = ctx.channel
 
-    # 곡 로드
-    async with ctx.typing():
-        players = await TrackFactory.from_url(url, loop=bot.loop)
-        if not players:
-            return await ctx.send("⚠️ 재생할 수 있는 콘텐츠를 찾지 못했습니다!")
+    # 파일 업로드 처리
+    if ctx.message.attachments:
+        attachment = ctx.message.attachments[0]
+        if not attachment.content_type.startswith('audio/'):
+            return await ctx.send("⚠️ 오디오 파일만 업로드 가능합니다.")
 
-        # 큐에 추가
-        client.audio_scheduler.enqueue_list(players)
+        async with ctx.typing():
+            try:
+                players = await TrackFactory.from_upload(attachment)
+                if not players:
+                    return await ctx.send("⚠️ 파일 처리에 실패했습니다.")
+            except Exception as e:
+                return await ctx.send(f"⚠️ 파일 처리 오류: {str(e)}")
+    else:
+        if not url:
+            return await ctx.send("URL을 입력하거나 오디오 파일을 업로드해주세요!")
 
-        # 사용자에게 알림
-        added_titles = "\n".join([f"- {p.title}" for p in players])
-        await ctx.send(f"**🎶 {len(players)}곡 추가됨:**\n{added_titles}")
+        # URL 처리
+        async with ctx.typing():
+            players = await TrackFactory.from_url(url)
+            if not players:
+                return await ctx.send("⚠️ 재생할 수 있는 콘텐츠를 찾지 못했습니다!")
+
+    # 큐에 추가
+    client.audio_scheduler.enqueue_list(players)
+
+    # 사용자에게 알림
+    added_titles = "\n".join([f"- {p.title}" for p in players])
+    await ctx.send(f"**🎶 {len(players)}곡 추가됨:**\n{added_titles}")
 
     # 만약 현재 재생중이 아니라면 다음 곡 재생
     if not client.voice_client.is_playing():
