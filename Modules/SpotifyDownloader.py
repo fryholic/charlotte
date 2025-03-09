@@ -36,7 +36,6 @@ def get_api():
     try:
         response = _SESSION.get('https://spotisongdownloader.to/track.php', headers=headers)
         print(f"API Status: {response.status_code}")
-        debug_response(response)
 
         patterns = [
             r'url:\s*["\'](/api/composer/spotify/[^"\']+)["\']',
