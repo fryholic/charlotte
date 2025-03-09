@@ -46,6 +46,7 @@ FFMPEG_OPTIONS_MEMORYAUDIOSOURCE = {
         '-c:a libopus '  # 오디오 코덱 지정
         '-b:a 320k '     # 비트레이트 설정
         '-ar 48000 '     # 샘플 레이트 강제 지정
+        '-af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
     )
 }
 
