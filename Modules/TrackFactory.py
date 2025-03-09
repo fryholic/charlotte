@@ -31,18 +31,9 @@ ytdl_format_options = {
     }],
 }
 
-# FFmpeg 옵션 설정 - 원본 charlotte_bot.py와 동일하게 설정
 FFMPEG_OPTIONS = {
-    'before_options': (
-        '-vn '           # 비디오 스트림 무시
-        '-loglevel warning '
-        '-report'
-    ),
-    'options': (
-        '-c:a libopus '  # 오디오 코덱 지정
-        '-b:a 320k '     # 비트레이트 설정
-        '-ar 48000 '     # 샘플 레이트 강제 지정
-    )
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+     'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
 }
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
@@ -78,7 +69,6 @@ class YouTubeSource(discord.FFmpegOpusAudio):
             print(f"YouTube Error: {e}")
             return []
 
-# charlotte_bot.py의 MemoryAudioSource 클래스와 동일하게 구현
 class MemoryAudioSource(discord.FFmpegOpusAudio):
     def __init__(self, buffer, metadata, *, bitrate=320):
         print(f"[1] 버퍼 타입: {type(buffer)}")
@@ -114,12 +104,10 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
 
     @classmethod
     async def from_upload(cls, file):
-        """업로드된 파일로부터 오디오 소스 생성"""
         buffer = io.BytesIO(await file.read())
         buffer.seek(0)
         
         try:
-            # 메타데이터 추출 시도 - 원본 코드와 동일하게 구현
             loop = asyncio.get_event_loop()
             audio = await loop.run_in_executor(None, MutagenFile, buffer)
             buffer.seek(0)
@@ -142,7 +130,6 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
 
     @classmethod
     async def from_spotify_url(cls, url):
-        """원본 from_spotify_track 메서드와 동일하게 구현"""
         buffer = io.BytesIO()
         try:
             # get_spotify_download_link 함수 호출
@@ -173,7 +160,6 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
 class TrackFactory:
     @staticmethod
     async def identify_source(query):
-        """소스 타입 식별 및 처리 - charlotte_bot.py의 identify_source와 유사하게 구현"""
         try:
             # Spotify URL 체크
             url_info = parse_uri(query)
