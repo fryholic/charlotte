@@ -296,6 +296,18 @@ async def on_voice_state_update(member, before, after):
                 await dm.send(file=discord.File('./img/charlotte_kick.gif'))
                 await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
 
+@bot.command(name='kick')
+async def voice_kick(ctx):
+    for member in ctx.guild.members:
+        if member.id in BLOCKED_USER_IDS:
+            try:
+                if member.voice and member.voice.channel:
+                    dm = await member.create_dm()
+                    await member.move_to(None)
+                    await dm.send(file=discord.File('./img/charlotte_kick.gif'))
+                    await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
+            except discord.Forbidden:
+                pass
 
 @bot.command(name='er')
 async def er_stat(ctx, player_id: str):
