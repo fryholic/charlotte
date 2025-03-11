@@ -5,6 +5,7 @@ services:
     build: .
     container_name: charlotte-bot
     restart: unless-stopped
+    shm_size: '2gb'
     command: python charlotte_bot.py
     #volumes:
       #- ./:/app
