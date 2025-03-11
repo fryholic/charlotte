@@ -69,7 +69,7 @@ async def setup_file_watcher(bot):
 # 봇 및 클라이언트 관리
 # -----------------------------------------
 clients : dict[int, ServerClient] = {}
-bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
+bot = commands.Bot(command_prefix='?', intents=discord.Intents.all())
 
 @bot.event
 async def on_ready():
