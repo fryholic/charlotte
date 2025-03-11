@@ -178,7 +178,9 @@ class TrackFactory:
                 token = await Downloader.get_token()
                 downloader = Downloader()
                 tracks, _, _ = await downloader.fetch_tracks(query)
-                return [await MemoryAudioSource.from_spotify_url(track) for track in tracks]
+                if tracks:
+                    first_track = tracks[0]
+                    return [await MemoryAudioSource.from_spotify_url(first_track)]
         except SpotifyInvalidUrlException:
             pass
         except Exception as e:
