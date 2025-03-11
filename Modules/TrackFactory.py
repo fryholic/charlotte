@@ -5,8 +5,18 @@ import discord
 import yt_dlp as youtube_dl
 from mutagen import File as MutagenFile
 
-from .SpotifyMetadata import parse_uri, get_filtered_data, SpotifyInvalidUrlException
-from .SpotifyDownloader import get_spotify_download_link, get_data
+
+
+#from .SpotifyMetadata import parse_uri, get_filtered_data, SpotifyInvalidUrlException
+#from .SpotifyDownloader import get_spotify_download_link, get_data
+
+from Modules.getMetadata import get_filtered_data, parse_uri, SpotifyInvalidUrlException
+from Modules.getToken_v1 import main as get_token_fast
+from Modules.getToken_v2 import main as get_token_slow
+from Modules.spotify import Downloader
+
+
+
 
 # -----------------------------------------
 # 유튜브 다운로드 설정
@@ -40,7 +50,6 @@ FFMPEG_OPTIONS_MEMORYAUDIOSOURCE = {
     'before_options': (
         '-vn '           # 비디오 스트림 무시
         '-loglevel warning '
-        '-report'
     ),
     'options': (
         '-c:a libopus '  # 오디오 코덱 지정
@@ -140,29 +149,21 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
         return [cls(buffer, metadata)]
 
     @classmethod
-    async def from_spotify_url(cls, url):
+    async def from_spotify_url(cls, track):
         buffer = io.BytesIO()
         try:
-            # get_spotify_download_link 함수 호출
-            final_link = await asyncio.to_thread(get_spotify_download_link, url)
+            result, msg = await Downloader()._download_track(track, buffer)
+            if not result:
+                raise Exception(msg)
             
-            # 오디오 데이터 다운로드
-            async with aiohttp.ClientSession() as session:
-                async with session.get(final_link) as response:
-                    response.raise_for_status()
-                    async for chunk in response.content.iter_chunked(8192):
-                        buffer.write(chunk)
-                    buffer.seek(0)
-
-            # 트랙 메타데이터 가져오기
-            track_data = await asyncio.to_thread(get_data, url)
+            # 메타데이터 구성
             metadata = {
-                'title': track_data.get('song_name', 'Spotify Track'),
-                'artist': track_data.get('artist', 'Unknown Artist'),
-                'duration': track_data.get('duration', 0)
+                'title': track.title,
+                'artist': track.artists,
+                'duration': track.duration_ms / 1000
             }
-            
-            return [cls(buffer, metadata)]
+        
+            return cls(buffer, metadata)
         except Exception as e:
             buffer.close()
             print(f"Spotify Error: {str(e)}")
@@ -172,14 +173,12 @@ class TrackFactory:
     @staticmethod
     async def identify_source(query):
         try:
-            # Spotify URL 체크
             url_info = parse_uri(query)
-            if url_info['type'] == 'track':
-                spotify_track_url = f"https://open.spotify.com/track/{url_info['id']}"
-                return await MemoryAudioSource.from_spotify_url(spotify_track_url)
-            else:
-                print("앨범/플레이리스트는 지원하지 않습니다.")
-                return None
+            if url_info['type'] in ['track', 'album', 'playlist']:
+                token = await Downloader.get_token()
+                downloader = Downloader()
+                tracks, _, _ = await downloader.fetch_tracks(query)
+                return [await MemoryAudioSource.from_spotify_url(track) for track in tracks]
         except SpotifyInvalidUrlException:
             pass
         except Exception as e:

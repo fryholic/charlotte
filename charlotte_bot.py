@@ -1,14 +1,17 @@
 import asyncio
 import io
 import math
-import os
 from datetime import datetime
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 
 import discord
 import matplotlib.pyplot as plt
 import requests
 from discord import File
 from discord.ext import commands
+
 from dotenv import load_dotenv
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -66,7 +69,7 @@ async def setup_file_watcher(bot):
 # 봇 및 클라이언트 관리
 # -----------------------------------------
 clients : dict[int, ServerClient] = {}
-bot = commands.Bot(command_prefix='?', intents=discord.Intents.all())
+bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
 @bot.event
 async def on_ready():
