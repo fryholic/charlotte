@@ -14,7 +14,15 @@ async def get_token(page, max_attempts=20, check_interval=0.5):
     raise TimeoutError()
 
 async def fetch_token():
-    browser = await zd.start(headless=False)
+    browser = await zd.start(
+    headless=False,
+    no_sandbox=True,
+    browser_executable_path="/usr/bin/google-chrome",
+    options={
+        "disable_dev_shm_usage": True,
+        "args": ["--display=:99"]
+    }
+)
     try:
         page = await browser.get("https://spotidownloader.com/")
         return await get_token(page)
