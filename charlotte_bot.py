@@ -99,16 +99,17 @@ async def on_message(message):
         return
     await bot.process_commands(message)
 
+    # [일시 중지] Korean Fixer
     # 문자열의 시작이 명령어 접두사가 아닐경우에만, 봇 또는 자기 자신이 입력한 메시지가 아닌 경우에만 실행
-    if not message.content.startswith(bot.command_prefix) and message.author != bot.user and not message.author.bot:
-        eng_distribution = english_ratio_excluding_code_and_urls(message.content)
-        if eng_distribution < 0.7:
-            return
+    # if not message.content.startswith(bot.command_prefix) and message.author != bot.user and not message.author.bot:
+    #     eng_distribution = english_ratio_excluding_code_and_urls(message.content)
+    #     if eng_distribution < 0.7:
+    #         return
 
-        korean_scale = detect_text_type(message.content)["korean_scale"]
-        if korean_scale > 0.9:
-            resolved_message = convert_mixed_string(message.content)
-            await message.channel.send(resolved_message)
+    #     korean_scale = detect_text_type(message.content)["korean_scale"]
+    #     if korean_scale > 0.9:
+    #         resolved_message = convert_mixed_string(message.content)
+    #         await message.channel.send(resolved_message)
 
 
 @bot.event
