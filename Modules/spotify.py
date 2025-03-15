@@ -10,7 +10,7 @@ from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TDRC, TRCK, TSRC, COMM
 
 import aiohttp
 
-from Modules.getMetadata import get_filtered_data, parse_uri, SpotifyInvalidUrlException
+from Modules.getMetadata_v2 import get_filtered_data, parse_uri, SpotifyInvalidUrlException
 from Modules.getToken_v1 import main as get_token_fast
 from Modules.getToken_v2 import main as get_token_slow
 
@@ -189,7 +189,7 @@ class Downloader:
         audio.tags.add(TIT2(encoding=3, text=track.title))
         audio.tags.add(TPE1(encoding=3, text=track.artists.split(", ")))
         audio.tags.add(TALB(encoding=3, text=track.album))
-        audio.tags.add(COMM(encoding=3, lang='eng', desc='Source', text='github.com/afkarxyz/SpotiDownloader'))
+        audio.tags.add(COMM(encoding=3, lang='eng', desc='Source', text='charlotte'))
 
         if track.release_date:
             audio.tags.add(TDRC(encoding=3, text=track.release_date))

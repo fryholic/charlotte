@@ -2,3 +2,4 @@
 .env
 downloads/
 __pycache__/
+token.txt
