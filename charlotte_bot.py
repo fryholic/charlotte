@@ -5,6 +5,7 @@ from datetime import datetime
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
+import traceback
 
 import discord
 import matplotlib.pyplot as plt
@@ -170,44 +171,54 @@ async def play(ctx, *, url=None):
 
     client = clients[ctx.guild.id]
 
-    # 음성 채널 접속
-    await client.join_voice_channel(ctx.author.voice.channel)
-    # 텍스트 채널 기억
-    client.audio_scheduler.text_channel = ctx.channel
+    try:
+        await client.join_voice_channel(ctx.author.voice.channel)
+        client.audio_scheduler.text_channel = ctx.channel
 
-    # 파일 업로드 처리
-    if ctx.message.attachments:
-        attachment = ctx.message.attachments[0]
-        if not attachment.content_type.startswith('audio/'):
-            return await ctx.send("⚠️ 오디오 파일만 업로드 가능합니다.")
+        players = []
 
-        async with ctx.typing():
-            try:
-                players = await TrackFactory.from_upload(attachment)
-                if not players:
-                    return await ctx.send("⚠️ 파일 처리에 실패했습니다.")
-            except Exception as e:
-                return await ctx.send(f"⚠️ 파일 처리 오류: {str(e)}")
-    else:
-        if not url:
-            return await ctx.send("URL을 입력하거나 오디오 파일을 업로드해주세요!")
+        if ctx.message.attachments:
+            attachment = ctx.message.attachments[0]
+            if not attachment.content_type.startswith('audio/'):
+                return await ctx.send("⚠️ 오디오 파일만 업로드 가능합니다.")
 
-        # URL 처리
-        async with ctx.typing():
-            players = await TrackFactory.from_url(url)
-            if not players:
-                return await ctx.send("⚠️ 재생할 수 있는 콘텐츠를 찾지 못했습니다!")
+            async with ctx.typing():
+                try:
+                    players = await TrackFactory.from_upload(attachment)
+                    if not players or not isinstance(players, list):
+                        return await ctx.send("⚠️ 파일 처리에 실패했습니다.")
+                except Exception as e:
+                    return await ctx.send(f"⚠️ 파일 처리 오류: {str(e)}")
+        else:
+            if not url:
+                return await ctx.send("URL을 입력하거나 오디오 파일을 업로드해주세요!")
 
-    # 큐에 추가
-    client.audio_scheduler.enqueue_list(players)
+            async with ctx.typing():
+                try:
+                    players = await TrackFactory.from_url(url)
+                    if not players or not isinstance(players, list):
+                        return await ctx.send("⚠️ 재생할 수 있는 콘텐츠를 찾지 못했습니다!")
+                    
+                    # Track 객체 유효성 검사 추가
+                    if any(not hasattr(track, 'title') for track in players):
+                        return await ctx.send("⚠️ 다시 시도해주세요!")
+                        
+                except Exception as e:
+                    return await ctx.send(f"⚠️ URL 처리 오류: {str(e)}")
 
-    # 사용자에게 알림
-    added_titles = "\n".join([f"- {p.title}" for p in players])
-    await ctx.send(f"**🎶 {len(players)}곡 추가됨:**\n{added_titles}")
+        # 큐에 추가
+        client.audio_scheduler.enqueue_list(players)
 
-    # 만약 현재 재생중이 아니라면 다음 곡 재생
-    if not client.voice_client.is_playing():
-        await play_next(ctx.guild)
+        # 사용자에게 알림
+        added_titles = "\n".join([f"- {p.title}" for p in players])
+        await ctx.send(f"**🎶 {len(players)}곡 추가됨:**\n{added_titles}")
+
+        if not client.voice_client.is_playing():
+            await play_next(ctx.guild)
+
+    except Exception as e:
+        print(f"Unexpected error: {traceback.format_exc()}")
+        await ctx.send(f"⚠️ 오류 발생: {str(e)}")
 
 @bot.command(name='skip')
 async def skip(ctx):

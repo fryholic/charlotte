@@ -128,20 +128,49 @@ class Downloader:
     async def _download_track(self, track, buffer):
         try:
             async with aiohttp.ClientSession() as session:
-                # Spotify API 요청
-                api_url = f"https://api.spotidownloader.com/download/{track.id}?token={await self.get_token()}"
-                async with session.get(api_url, headers={
-                    'Host': 'api.spotidownloader.com',
-                    'Referer': 'https://spotidownloader.com/',
-                    'Origin': 'https://spotidownloader.com',
-                }, timeout=aiohttp.ClientTimeout(total=30)) as response:
-                    if response.status != 200:
-                        return False, f"API 요청 실패: {await response.text()}"
-                    data = await response.json()
-                    if not data.get('success'):
-                        return False, data.get('error', 'Unknown error')
+                max_retries = 2
+                retry_count = 0
+                success = False
+                error_message = ""
 
-                # 오디오 다운로드
+                while retry_count <= max_retries and not success:
+                    token = await self.get_token()
+                    api_url = f"https://api.spotidownloader.com/download/{track.id}?token={token}"
+                    async with session.get(api_url, headers={
+                        'Host': 'api.spotidownloader.com',
+                        'Referer': 'https://spotidownloader.com/',
+                        'Origin': 'https://spotidownloader.com',
+                    }, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                        if response.status != 200:
+                            error_message = await response.text()
+                            if retry_count < max_retries:
+                                # 토큰 무효화 및 갱신 유도
+                                self.__class__._token = None
+                                self.__class__._token_expiry = datetime.now() - timedelta(minutes=1)
+                                retry_count += 1
+                                continue
+                            else:
+                                return False, f"API 요청 실패: {error_message}"
+                        
+                        data = await response.json()
+                        if not data.get('success'):
+                            error_message = data.get('error', 'Unknown error')
+                            if retry_count < max_retries:
+                                # 토큰 무효화 및 갱신 유도
+                                self.__class__._token = None
+                                self.__class__._token_expiry = datetime.now() - timedelta(minutes=1)
+                                retry_count += 1
+                                continue
+                            else:
+                                return False, error_message
+                        
+                        # API 요청 성공 시 루프 탈출
+                        success = True
+
+                if not success:
+                    return False, error_message
+
+                # 오디오 다운로드 로직
                 async with session.get(data['link'], timeout=aiohttp.ClientTimeout(total=300)) as audio_response:
                     if audio_response.status != 200:
                         return False, f"오디오 다운로드 실패: {audio_response.status}"
@@ -178,6 +207,7 @@ class Downloader:
     async def _embed_metadata(self, buffer, track):
         buffer.seek(0)
         if buffer.getvalue() == b"":
+            buffer.close()
             raise Exception("버퍼가 비어 있음: 오디오 데이터 없음")
 
         audio = MP3(buffer, ID3=ID3)
