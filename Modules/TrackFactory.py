@@ -10,7 +10,7 @@ from mutagen import File as MutagenFile
 #from .SpotifyMetadata import parse_uri, get_filtered_data, SpotifyInvalidUrlException
 #from .SpotifyDownloader import get_spotify_download_link, get_data
 
-from Modules.getMetadata import get_filtered_data, parse_uri, SpotifyInvalidUrlException
+from Modules.getMetadata_v2 import get_filtered_data, parse_uri, SpotifyInvalidUrlException
 from Modules.getToken_v1 import main as get_token_fast
 from Modules.getToken_v2 import main as get_token_slow
 from Modules.spotify import Downloader
@@ -154,6 +154,7 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
         try:
             result, msg = await Downloader()._download_track(track, buffer)
             if not result:
+                buffer.close()
                 raise Exception(msg)
             
             # 메타데이터 구성
@@ -167,7 +168,7 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
         except Exception as e:
             buffer.close()
             print(f"Spotify Error: {str(e)}")
-            return []
+            return
 
 class TrackFactory:
     @staticmethod
