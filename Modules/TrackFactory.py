@@ -10,13 +10,16 @@ from mutagen import File as MutagenFile
 #from .SpotifyMetadata import parse_uri, get_filtered_data, SpotifyInvalidUrlException
 #from .SpotifyDownloader import get_spotify_download_link, get_data
 
-from Modules.getMetadata_v2 import get_filtered_data, parse_uri, SpotifyInvalidUrlException
+#from Modules.getMetadata_v2 import get_filtered_data, parse_uri, SpotifyInvalidUrlException
+from Modules.getMetadata import get_filtered_data, parse_uri, SpotifyInvalidUrlException
 from Modules.getToken_v1 import main as get_token_fast
-from Modules.getToken_v2 import main as get_token_slow
-from Modules.spotify import Downloader
+# from Modules.getToken import main as get_token_slow
+from Modules.spotify import Downloader, TokenManager
 
+# -----------------------------------------
+# 토큰 관리
 
-
+token_manager = None
 
 # -----------------------------------------
 # 유튜브 다운로드 설정
@@ -97,10 +100,11 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
         self.buffer = buffer
         self.metadata = metadata
         self.title = metadata.get('title', 'Unknown')
+        self._is_closed = False
 
         try:
             super().__init__(
-                buffer,
+                self.buffer,
                 pipe=True,
                 bitrate=bitrate,
                 **FFMPEG_OPTIONS_MEMORYAUDIOSOURCE
@@ -110,17 +114,20 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
             self.buffer.close()
             raise
 
+    def _close_buffer(self):
+        if not self._is_closed and hasattr(self, 'buffer'):
+            try:
+                self.buffer.close()
+                self._is_closed = True
+                print("[✓] 버퍼 정리 완료")
+            except Exception as e:
+                print(f"[✗] 버퍼 정리 실패: {e}")
+
     def cleanup(self):
-        """리소스 정리"""
         try:
             super().cleanup()
         finally:
-            if hasattr(self, 'buffer'):
-                try:
-                    self.buffer.close()
-                    print("[✓] 버퍼 정리 완료")
-                except:
-                    print("[✗] 버퍼 정리 실패")
+            self._close_buffer()
 
     @classmethod
     async def from_upload(cls, file):
@@ -149,39 +156,79 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
         return [cls(buffer, metadata)]
 
     @classmethod
-    async def from_spotify_url(cls, track):
+    async def from_spotify_url(cls, track, token_manager):
         buffer = io.BytesIO()
         try:
-            result, msg = await Downloader()._download_track(track, buffer)
-            if not result:
-                buffer.close()
+            # 새로운 Downloader 인스턴스 생성
+            downloader = Downloader(
+                token_manager=token_manager,
+                output_path=None,  # 파일 저장 비활성화
+                filename_format='title_artist',
+                use_track_numbers=False,
+                use_album_subfolders=False
+            )
+            
+            # 트랙 다운로드 및 버퍼에 저장
+            success, msg, buffer = await downloader._download_track(track)  # 버퍼 전달
+            if not success:
                 raise Exception(msg)
             
-            # 메타데이터 구성
+            buffer.seek(0)
+
+            # with open('debug.mp3', 'wb') as f:
+            #     f.write(buffer.getbuffer())
+                     
+
+            # 다운로드된 버퍼에서 메타데이터 추출
+            
             metadata = {
                 'title': track.title,
                 'artist': track.artists,
                 'duration': track.duration_ms / 1000
             }
-        
+            
+            buffer.seek(0)
+
             return cls(buffer, metadata)
+            
         except Exception as e:
-            buffer.close()
             print(f"Spotify Error: {str(e)}")
-            return
+            return None
 
 class TrackFactory:
     @staticmethod
+    async def initialize():
+        global token_manager
+        if token_manager is None:
+            token_manager = TokenManager()
+            asyncio.create_task(token_manager.start())
+            print("✅ TokenManager 초기화 및 시작됨")
+
+    @staticmethod
     async def identify_source(query):
+        global token_manager
         try:
+            await TrackFactory.initialize()  # 초기화 확인
+            if token_manager is None:
+                raise Exception("TokenManager가 초기화되지 않았습니다.")
+
             url_info = parse_uri(query)
             if url_info['type'] in ['track', 'album', 'playlist']:
-                token = await Downloader.get_token()
-                downloader = Downloader()
+                # 새로운 Downloader 인스턴스 생성
+                downloader = Downloader(
+                    token_manager=token_manager,
+                    output_path=None,
+                    filename_format='title_artist',
+                    use_track_numbers=False,
+                    use_album_subfolders=False
+                )
+                
+                # 트랙 목록 가져오기
                 tracks, _, _ = await downloader.fetch_tracks(query)
                 if tracks:
                     first_track = tracks[0]
-                    return [await MemoryAudioSource.from_spotify_url(first_track)]
+                    return [await MemoryAudioSource.from_spotify_url(first_track, token_manager)]
+                    
         except SpotifyInvalidUrlException:
             pass
         except Exception as e:
