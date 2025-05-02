@@ -10,10 +10,11 @@ from mutagen import File as MutagenFile
 #from .SpotifyMetadata import parse_uri, get_filtered_data, SpotifyInvalidUrlException
 #from .SpotifyDownloader import get_spotify_download_link, get_data
 
-from Modules.getMetadata_v2 import get_filtered_data, parse_uri, SpotifyInvalidUrlException
+#from Modules.getMetadata_v2 import get_filtered_data, parse_uri, SpotifyInvalidUrlException
+from Modules.getMetadata import get_filtered_data, parse_uri, SpotifyInvalidUrlException
 from Modules.getToken_v1 import main as get_token_fast
-from Modules.getToken_v2 import main as get_token_slow
-from Modules.spotify import Downloader
+# from Modules.getToken import main as get_token_slow
+from Modules.spotify import Downloader, TokenManager
 
 
 
@@ -149,39 +150,112 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
         return [cls(buffer, metadata)]
 
     @classmethod
-    async def from_spotify_url(cls, track):
+    async def from_spotify_url(cls, track, token_manager):
+        # buffer = io.BytesIO()
+        # try:
+        #     result, msg = await Downloader()._download_track(track, buffer)
+        #     if not result:
+        #         buffer.close()
+        #         raise Exception(msg)
+            
+        #     # 메타데이터 구성
+        #     metadata = {
+        #         'title': track.title,
+        #         'artist': track.artists,
+        #         'duration': track.duration_ms / 1000
+        #     }
+        
+        #     return cls(buffer, metadata)
+        # except Exception as e:
+        #     buffer.close()
+        #     print(f"Spotify Error: {str(e)}")
+        #     return
         buffer = io.BytesIO()
         try:
-            result, msg = await Downloader()._download_track(track, buffer)
-            if not result:
-                buffer.close()
+            # 새로운 Downloader 인스턴스 생성
+            downloader = Downloader(
+                token_manager,
+                output_path=None,  # 파일 저장 비활성화
+                filename_format='title_artist',
+                use_track_numbers=False,
+                use_album_subfolders=False
+            )
+            
+            # 트랙 다운로드 및 버퍼에 저장
+            success, msg = await downloader._download_track(
+                track=track,
+                content_type='track',
+                content_name='discord_stream'
+            )
+            
+            if not success:
                 raise Exception(msg)
             
-            # 메타데이터 구성
+            # 다운로드된 버퍼에서 메타데이터 추출
+            buffer.seek(0)
             metadata = {
                 'title': track.title,
                 'artist': track.artists,
                 'duration': track.duration_ms / 1000
             }
-        
+            
             return cls(buffer, metadata)
+            
         except Exception as e:
             buffer.close()
             print(f"Spotify Error: {str(e)}")
-            return
+            return None
 
 class TrackFactory:
+    _token_manager = None  # 클래스 변수로 TokenManager 관리
+
+    @classmethod
+    async def initialize(cls):
+        """초기화 및 토큰 매니저 시작"""
+        if not cls._token_manager:
+            cls._token_manager = TokenManager()
+            cls._token_task = asyncio.create_task(cls._token_manager.start())
+            
+            # 초기 토큰 획득 대기
+            while not cls._token_manager.token:
+                print("Waiting for initial token...")
+                await asyncio.sleep(1)
+
     @staticmethod
     async def identify_source(query):
         try:
+        #     url_info = parse_uri(query)
+        #     if url_info['type'] in ['track', 'album', 'playlist']:
+        #         token = await Downloader.get_token()
+        #         downloader = Downloader()
+        #         tracks, _, _ = await downloader.fetch_tracks(query)
+        #         if tracks:
+        #             first_track = tracks[0]
+        #             return [await MemoryAudioSource.from_spotify_url(first_track)]
+        # except SpotifyInvalidUrlException:
+        #     pass
+        # except Exception as e:
+        #     print(f"Spotify 처리 오류: {str(e)}")
+        #     return None
+            await TrackFactory.initialize()  # 초기화 확인
+            
             url_info = parse_uri(query)
             if url_info['type'] in ['track', 'album', 'playlist']:
-                token = await Downloader.get_token()
-                downloader = Downloader()
+                # 새로운 Downloader 인스턴스 생성
+                downloader = Downloader(
+                    token_manager=TrackFactory._token_manager,
+                    output_path=None,
+                    filename_format='title_artist',
+                    use_track_numbers=False,
+                    use_album_subfolders=False
+                )
+                
+                # 트랙 목록 가져오기
                 tracks, _, _ = await downloader.fetch_tracks(query)
                 if tracks:
                     first_track = tracks[0]
-                    return [await MemoryAudioSource.from_spotify_url(first_track)]
+                    return [await MemoryAudioSource.from_spotify_url(first_track, TrackFactory._token_manager)]
+                    
         except SpotifyInvalidUrlException:
             pass
         except Exception as e:
