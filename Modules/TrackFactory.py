@@ -98,10 +98,11 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
         self.buffer = buffer
         self.metadata = metadata
         self.title = metadata.get('title', 'Unknown')
+        self._is_closed = False
 
         try:
             super().__init__(
-                buffer,
+                self.buffer,
                 pipe=True,
                 bitrate=bitrate,
                 **FFMPEG_OPTIONS_MEMORYAUDIOSOURCE
@@ -111,17 +112,20 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
             self.buffer.close()
             raise
 
+    def _close_buffer(self):
+        if not self._is_closed and hasattr(self, 'buffer'):
+            try:
+                self.buffer.close()
+                self._is_closed = True
+                print("[✓] 버퍼 정리 완료")
+            except Exception as e:
+                print(f"[✗] 버퍼 정리 실패: {e}")
+
     def cleanup(self):
-        """리소스 정리"""
         try:
             super().cleanup()
         finally:
-            if hasattr(self, 'buffer'):
-                try:
-                    self.buffer.close()
-                    print("[✓] 버퍼 정리 완료")
-                except:
-                    print("[✗] 버퍼 정리 실패")
+            self._close_buffer()
 
     @classmethod
     async def from_upload(cls, file):
@@ -151,25 +155,6 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
 
     @classmethod
     async def from_spotify_url(cls, track, token_manager):
-        # buffer = io.BytesIO()
-        # try:
-        #     result, msg = await Downloader()._download_track(track, buffer)
-        #     if not result:
-        #         buffer.close()
-        #         raise Exception(msg)
-            
-        #     # 메타데이터 구성
-        #     metadata = {
-        #         'title': track.title,
-        #         'artist': track.artists,
-        #         'duration': track.duration_ms / 1000
-        #     }
-        
-        #     return cls(buffer, metadata)
-        # except Exception as e:
-        #     buffer.close()
-        #     print(f"Spotify Error: {str(e)}")
-        #     return
         buffer = io.BytesIO()
         try:
             # 새로운 Downloader 인스턴스 생성
@@ -182,27 +167,29 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
             )
             
             # 트랙 다운로드 및 버퍼에 저장
-            success, msg = await downloader._download_track(
-                track=track,
-                content_type='track',
-                content_name='discord_stream'
-            )
-            
+            success, msg, buffer = await downloader._download_track(track)  # 버퍼 전달
             if not success:
                 raise Exception(msg)
             
-            # 다운로드된 버퍼에서 메타데이터 추출
             buffer.seek(0)
+
+            # with open('debug.mp3', 'wb') as f:
+            #     f.write(buffer.getbuffer())
+                     
+
+            # 다운로드된 버퍼에서 메타데이터 추출
+            
             metadata = {
                 'title': track.title,
                 'artist': track.artists,
                 'duration': track.duration_ms / 1000
             }
             
+            buffer.seek(0)
+
             return cls(buffer, metadata)
             
         except Exception as e:
-            buffer.close()
             print(f"Spotify Error: {str(e)}")
             return None
 
@@ -224,19 +211,6 @@ class TrackFactory:
     @staticmethod
     async def identify_source(query):
         try:
-        #     url_info = parse_uri(query)
-        #     if url_info['type'] in ['track', 'album', 'playlist']:
-        #         token = await Downloader.get_token()
-        #         downloader = Downloader()
-        #         tracks, _, _ = await downloader.fetch_tracks(query)
-        #         if tracks:
-        #             first_track = tracks[0]
-        #             return [await MemoryAudioSource.from_spotify_url(first_track)]
-        # except SpotifyInvalidUrlException:
-        #     pass
-        # except Exception as e:
-        #     print(f"Spotify 처리 오류: {str(e)}")
-        #     return None
             await TrackFactory.initialize()  # 초기화 확인
             
             url_info = parse_uri(query)
