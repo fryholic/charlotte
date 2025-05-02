@@ -163,6 +163,7 @@ class Downloader:
                     ) as response:
                         if response.status != 200:
                             error_message = await response.text()
+                            self.token_manager.trigger_refresh()
                             raise Exception(f"API request failed: {error_message}")
 
                         data = await response.json()

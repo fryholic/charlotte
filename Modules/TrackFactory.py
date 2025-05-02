@@ -16,8 +16,10 @@ from Modules.getToken_v1 import main as get_token_fast
 # from Modules.getToken import main as get_token_slow
 from Modules.spotify import Downloader, TokenManager
 
+# -----------------------------------------
+# 토큰 관리
 
-
+token_manager = None
 
 # -----------------------------------------
 # 유튜브 다운로드 설정
@@ -159,7 +161,7 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
         try:
             # 새로운 Downloader 인스턴스 생성
             downloader = Downloader(
-                token_manager,
+                token_manager=token_manager,
                 output_path=None,  # 파일 저장 비활성화
                 filename_format='title_artist',
                 use_track_numbers=False,
@@ -194,30 +196,27 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
             return None
 
 class TrackFactory:
-    _token_manager = None  # 클래스 변수로 TokenManager 관리
-
-    @classmethod
-    async def initialize(cls):
-        """초기화 및 토큰 매니저 시작"""
-        if not cls._token_manager:
-            cls._token_manager = TokenManager()
-            cls._token_task = asyncio.create_task(cls._token_manager.start())
-            
-            # 초기 토큰 획득 대기
-            while not cls._token_manager.token:
-                print("Waiting for initial token...")
-                await asyncio.sleep(1)
+    @staticmethod
+    async def initialize():
+        global token_manager
+        if token_manager is None:
+            token_manager = TokenManager()
+            asyncio.create_task(token_manager.start())
+            print("✅ TokenManager 초기화 및 시작됨")
 
     @staticmethod
     async def identify_source(query):
+        global token_manager
         try:
             await TrackFactory.initialize()  # 초기화 확인
-            
+            if token_manager is None:
+                raise Exception("TokenManager가 초기화되지 않았습니다.")
+
             url_info = parse_uri(query)
             if url_info['type'] in ['track', 'album', 'playlist']:
                 # 새로운 Downloader 인스턴스 생성
                 downloader = Downloader(
-                    token_manager=TrackFactory._token_manager,
+                    token_manager=token_manager,
                     output_path=None,
                     filename_format='title_artist',
                     use_track_numbers=False,
@@ -228,7 +227,7 @@ class TrackFactory:
                 tracks, _, _ = await downloader.fetch_tracks(query)
                 if tracks:
                     first_track = tracks[0]
-                    return [await MemoryAudioSource.from_spotify_url(first_track, TrackFactory._token_manager)]
+                    return [await MemoryAudioSource.from_spotify_url(first_track, token_manager)]
                     
         except SpotifyInvalidUrlException:
             pass

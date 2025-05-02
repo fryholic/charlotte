@@ -22,6 +22,8 @@ from Modules.LanguageResearcher import detect_text_type
 from Modules.ServerClient import ServerClient
 from Modules.TrackFactory import TrackFactory
 
+from Modules.spotify import TokenManager
+
 # 차단 목록 초기화
 raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
 BLOCKED_USER_IDS = []
@@ -66,6 +68,7 @@ async def setup_file_watcher(bot):
     print("✅ 파일 감시기 시작됨")
     return observer
 
+
 # -----------------------------------------
 # 봇 및 클라이언트 관리
 # -----------------------------------------
@@ -78,7 +81,8 @@ async def on_ready():
     bot.file_observer = await setup_file_watcher(bot)
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="?help"))
 
-    # 접속한 모든 서버마다 ServerClient 생성
+    await TrackFactory.initialize()
+
     for guild in bot.guilds:
         if guild.id not in clients:
             clients[guild.id] = ServerClient(guild.id)
