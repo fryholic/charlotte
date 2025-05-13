@@ -19,7 +19,7 @@ from Modules.spotify import Downloader, TokenManager
 # -----------------------------------------
 # 토큰 관리
 
-token_manager = None
+# token_manager = None
 
 # -----------------------------------------
 # 유튜브 다운로드 설정
@@ -157,83 +157,85 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
 
     @classmethod
     async def from_spotify_url(cls, track, token_manager):
-        buffer = io.BytesIO()
+        # buffer = io.BytesIO()
         try:
-            # 새로운 Downloader 인스턴스 생성
-            downloader = Downloader(
-                token_manager=token_manager,
-                output_path=None,  # 파일 저장 비활성화
-                filename_format='title_artist',
-                use_track_numbers=False,
-                use_album_subfolders=False
-            )
+            # # 새로운 Downloader 인스턴스 생성
+            # downloader = Downloader(
+            #     token_manager=token_manager,
+            #     output_path=None,  # 파일 저장 비활성화
+            #     filename_format='title_artist',
+            #     use_track_numbers=False,
+            #     use_album_subfolders=False
+            # )
             
-            # 트랙 다운로드 및 버퍼에 저장
-            success, msg, buffer = await downloader._download_track(track)  # 버퍼 전달
-            if not success:
-                raise Exception(msg)
+            # # 트랙 다운로드 및 버퍼에 저장
+            # success, msg, buffer = await downloader._download_track(track)  # 버퍼 전달
+            # if not success:
+            #     raise Exception(msg)
             
-            buffer.seek(0)
+            # buffer.seek(0)
 
-            # with open('debug.mp3', 'wb') as f:
-            #     f.write(buffer.getbuffer())
+            # # with open('debug.mp3', 'wb') as f:
+            # #     f.write(buffer.getbuffer())
                      
 
-            # 다운로드된 버퍼에서 메타데이터 추출
+            # # 다운로드된 버퍼에서 메타데이터 추출
             
-            metadata = {
-                'title': track.title,
-                'artist': track.artists,
-                'duration': track.duration_ms / 1000
-            }
+            # metadata = {
+            #     'title': track.title,
+            #     'artist': track.artists,
+            #     'duration': track.duration_ms / 1000
+            # }
             
-            buffer.seek(0)
+            # buffer.seek(0)
 
-            return cls(buffer, metadata)
+            # return cls(buffer, metadata)
+            raise Exception("정비중")
             
         except Exception as e:
             print(f"Spotify Error: {str(e)}")
             return None
 
 class TrackFactory:
-    @staticmethod
-    async def initialize():
-        global token_manager
-        if token_manager is None:
-            token_manager = TokenManager()
-            asyncio.create_task(token_manager.start())
-            print("✅ TokenManager 초기화 및 시작됨")
+    # @staticmethod
+    # async def initialize():
+    #     global token_manager
+    #     if token_manager is None:
+    #         token_manager = TokenManager()
+    #         asyncio.create_task(token_manager.start())
+    #         print("✅ TokenManager 초기화 및 시작됨")
 
     @staticmethod
     async def identify_source(query):
-        global token_manager
-        try:
-            await TrackFactory.initialize()  # 초기화 확인
-            if token_manager is None:
-                raise Exception("TokenManager가 초기화되지 않았습니다.")
+        # global token_manager
+        # try:
+            # await TrackFactory.initialize()  # 초기화 확인
+            # if token_manager is None:
+            #     raise Exception("TokenManager가 초기화되지 않았습니다.")
 
-            url_info = parse_uri(query)
-            if url_info['type'] in ['track', 'album', 'playlist']:
-                # 새로운 Downloader 인스턴스 생성
-                downloader = Downloader(
-                    token_manager=token_manager,
-                    output_path=None,
-                    filename_format='title_artist',
-                    use_track_numbers=False,
-                    use_album_subfolders=False
-                )
+            # url_info = parse_uri(query)
+            # if url_info['type'] in ['track', 'album', 'playlist']:
+            #     # 새로운 Downloader 인스턴스 생성
+            #     downloader = Downloader(
+            #         token_manager=token_manager,
+            #         output_path=None,
+            #         filename_format='title_artist',
+            #         use_track_numbers=False,
+            #         use_album_subfolders=False
+            #     )
                 
-                # 트랙 목록 가져오기
-                tracks, _, _ = await downloader.fetch_tracks(query)
-                if tracks:
-                    first_track = tracks[0]
-                    return [await MemoryAudioSource.from_spotify_url(first_track, token_manager)]
+            #     # 트랙 목록 가져오기
+            #     tracks, _, _ = await downloader.fetch_tracks(query)
+            #     if tracks:
+            #         first_track = tracks[0]
+            #         return [await MemoryAudioSource.from_spotify_url(first_track, token_manager)]
+            # raise Exception 
                     
-        except SpotifyInvalidUrlException:
-            pass
-        except Exception as e:
-            print(f"Spotify 처리 오류: {str(e)}")
-            return None
+        # except SpotifyInvalidUrlException:
+        #     pass
+        # except Exception as e:
+        #     print(f"Spotify 처리 오류: {str(e)}")
+        #     return None
 
         # YouTube URL 또는 검색어 처리
         if 'youtube.com/' in query or 'youtu.be/' in query:
