@@ -2,6 +2,7 @@ import asyncio
 import zendriver as zd
 from zendriver import Config
 from typing import Optional
+import random
 
 async def get_turnstile_token(page, max_attempts=20, check_interval=0.5) -> Optional[str]:
     attempts = 0
@@ -26,6 +27,17 @@ async def get_session_token(max_wait: int = 30) -> Optional[str]:
                             )
     try:
         page = await browser.get("https://spotidownloader.com/")
+        await asyncio.sleep(random.uniform(0.3, 1.2))  # Random sleep to avoid detection
+        
+        await page.evaluate("""
+            const event = new MouseEvent('mousemove', {
+                bubbles: true,
+                clientX: 200,
+                clientY: 300
+            });
+            document.dispatchEvent(event);
+        """)
+        
         
         # Inject fetch interceptor
         await page.evaluate("""

@@ -81,7 +81,7 @@ async def on_ready():
     bot.file_observer = await setup_file_watcher(bot)
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="?help"))
 
-    await TrackFactory.initialize()
+    # await TrackFactory.initialize()
 
     for guild in bot.guilds:
         if guild.id not in clients:
