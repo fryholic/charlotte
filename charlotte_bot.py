@@ -291,12 +291,13 @@ async def resume(ctx):
 
 
 # 알 수 없는 명령어 처리
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        await ctx.send("⚠️ 알 수 없는 명령어입니다. ?help 를 참조하세요.")
-    else:
-        print(f'오류 발생: {error}')
+
+# @bot.event
+# async def on_command_error(ctx, error):
+#    if isinstance(error, commands.CommandNotFound):
+#        await ctx.send("⚠️ 알 수 없는 명령어입니다. ?help 를 참조하세요.")
+#    else:
+#        print(f'오류 발생: {error}')
 
 
 # 차단된 유저가 음성에서 마이크를 끄면 감시 → 강퇴 예시
