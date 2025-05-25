@@ -1,7 +1,8 @@
 FROM python:3.11.11-slim
 
 RUN apt-get update && apt-get install -y \
-    ffmpeg
+    ffmpeg \
+    supervisor
 
 RUN apt-get update && apt-get install -y \
     wget \
@@ -19,11 +20,10 @@ RUN apt-get update && apt-get install -y \
 
 # RUN apt-get install -y xvfb
 
-WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
 
-COPY requirements.txt /app/
-RUN pip install --cache-dir /root/.cache/pip --upgrade pip \
- && pip install --cache-dir /root/.cache/pip -r requirements.txt
+WORKDIR /app
 
 COPY . .
 

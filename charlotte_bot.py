@@ -4,12 +4,13 @@ import math
 from datetime import datetime
 import sys
 import os
+import threading
+import requests
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 import traceback
 
 import discord
 import matplotlib.pyplot as plt
-import requests
 from discord import File
 from discord.ext import commands
 
@@ -75,10 +76,18 @@ async def setup_file_watcher(bot):
 clients : dict[int, ServerClient] = {}
 bot = commands.Bot(command_prefix='?', intents=discord.Intents.all())
 
+def send_log(message):
+    """로그 서버로 메시지 전송"""
+    try:
+        requests.get(f'http://localhost:5000/add/{message}')
+    except:
+        pass  # 로그 서버가 실행되지 않은 경우 무시
+
 @bot.event
 async def on_ready():
     print(f'{bot.user.name}이 성공적으로 로그인!')
-    # bot.file_observer = await setup_file_watcher(bot)
+    send_log(f'{bot.user.name}이 성공적으로 로그인!')
+    
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="?help"))
 
     # await TrackFactory.initialize()
@@ -88,12 +97,15 @@ async def on_ready():
             clients[guild.id] = ServerClient(guild.id)
 
     print("🔊 서버 클라이언트 초기화 완료")
+    send_log("🔊 서버 클라이언트 초기화 완료")
 
 @bot.event
 async def on_guild_join(guild):
     if guild.id not in clients:
         clients[guild.id] = ServerClient(guild.id)
-        print(f"서버 클라이언트 추가: {guild.id}")
+        message = f"서버 클라이언트 추가: {guild.id}"
+        print(message)
+        send_log(message)
 
 
 @bot.event

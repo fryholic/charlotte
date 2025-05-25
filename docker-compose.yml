@@ -6,10 +6,9 @@ services:
     container_name: charlotte-bot
     restart: unless-stopped
     shm_size: '2gb'
-    command: python charlotte_bot.py
-    #volumes:
-      #- ./:/app
-      #- ./.env:/app/.env
+    command: supervisord -c /app/supervisord.conf
+    ports:
+      - "5000:5000"  # 로그 서버 포트
     volumes:
       - type: bind
         source: /home/mizore/charlotte/
