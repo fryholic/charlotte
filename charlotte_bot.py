@@ -78,7 +78,7 @@ bot = commands.Bot(command_prefix='?', intents=discord.Intents.all())
 @bot.event
 async def on_ready():
     print(f'{bot.user.name}이 성공적으로 로그인!')
-    bot.file_observer = await setup_file_watcher(bot)
+    # bot.file_observer = await setup_file_watcher(bot)
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="?help"))
 
     # await TrackFactory.initialize()
@@ -98,10 +98,10 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_message(message):
-    # 만약 차단된 사용자가 봇 명령어를 입력하면 무시
-    if message.author.id in BLOCKED_USER_IDS and message.content.startswith(bot.command_prefix):
-        print(f"차단된 사용자 : {message.author.id}")
-        return
+    # # 만약 차단된 사용자가 봇 명령어를 입력하면 무시
+    # if message.author.id in BLOCKED_USER_IDS and message.content.startswith(bot.command_prefix):
+    #     print(f"차단된 사용자 : {message.author.id}")
+    #     return
     await bot.process_commands(message)
 
     # [일시 중지] Korean Fixer
@@ -300,34 +300,34 @@ async def resume(ctx):
 #        print(f'오류 발생: {error}')
 
 
-# 차단된 유저가 음성에서 마이크를 끄면 감시 → 강퇴 예시
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if member.id in BLOCKED_USER_IDS:
-        # self_mute가 True라면
-        if after.self_mute:
-            dm = await member.create_dm()
-            await dm.send(file=discord.File('./img/charlotte_warn.png'))
-            await dm.send("🔇 마이크를 껐습니다. 10초 이내로 다시 켜지 않으면 음성 채널에서 내보냅니다.")
-            await asyncio.sleep(10)
-            # 10초 뒤에도 여전히 마이크가 꺼져있다면
-            if member.voice and member.voice.self_mute:
-                await member.move_to(None)
-                await dm.send(file=discord.File('./img/charlotte_kick.gif'))
-                await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
+# # 차단된 유저가 음성에서 마이크를 끄면 감시 → 강퇴 예시
+# @bot.event
+# async def on_voice_state_update(member, before, after):
+#     if member.id in BLOCKED_USER_IDS:
+#         # self_mute가 True라면
+#         if after.self_mute:
+#             dm = await member.create_dm()
+#             await dm.send(file=discord.File('./img/charlotte_warn.png'))
+#             await dm.send("🔇 마이크를 껐습니다. 10초 이내로 다시 켜지 않으면 음성 채널에서 내보냅니다.")
+#             await asyncio.sleep(10)
+#             # 10초 뒤에도 여전히 마이크가 꺼져있다면
+#             if member.voice and member.voice.self_mute:
+#                 await member.move_to(None)
+#                 await dm.send(file=discord.File('./img/charlotte_kick.gif'))
+#                 await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
 
-@bot.command(name='kick')
-async def voice_kick(ctx):
-    for member in ctx.guild.members:
-        if member.id in BLOCKED_USER_IDS:
-            try:
-                if member.voice and member.voice.channel:
-                    dm = await member.create_dm()
-                    await member.move_to(None)
-                    await dm.send(file=discord.File('./img/charlotte_kick.gif'))
-                    await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
-            except discord.Forbidden:
-                pass
+# @bot.command(name='kick')
+# async def voice_kick(ctx):
+#     for member in ctx.guild.members:
+#         if member.id in BLOCKED_USER_IDS:
+#             try:
+#                 if member.voice and member.voice.channel:
+#                     dm = await member.create_dm()
+#                     await member.move_to(None)
+#                     await dm.send(file=discord.File('./img/charlotte_kick.gif'))
+#                     await dm.send("🚪 마이크를 켜지 않아 음성 채널에서 내보냈습니다.")
+#             except discord.Forbidden:
+#                 pass
 
 @bot.command(name='er')
 async def er_stat(ctx, player_id: str):
