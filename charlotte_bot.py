@@ -255,13 +255,25 @@ async def show_queue(ctx):
 
 @bot.command(name='stop')
 async def stop(ctx):
-    """재생 중지 및 연결 종료"""
+    """모든 재생 정지 및 대기열 비우기"""
     client = clients[ctx.guild.id]
     voice_client = client.voice_client
     if voice_client and voice_client.is_connected():
-        client.audio_scheduler.clear()
+        client.audio_scheduler.clear()  # 대기열 비우기
+        if voice_client.is_playing():
+            voice_client.stop()  # 재생 중지
+        await ctx.send("🛑 모든 재생이 정지되고 대기열이 비워졌습니다.")
+    else:
+        await ctx.send("봇이 음성 채널에 연결되어 있지 않습니다!")
+
+@bot.command(name='leave')
+async def leave(ctx):
+    """음성 채널 떠나기"""
+    client = clients[ctx.guild.id]
+    voice_client = client.voice_client
+    if voice_client and voice_client.is_connected():
         await client.leave_voice_channel()
-        await ctx.send("🛑 재생 중지 및 연결 종료")
+        await ctx.send("👋 음성 채널을 떠났습니다.")
     else:
         await ctx.send("봇이 음성 채널에 연결되어 있지 않습니다!")
 
@@ -529,6 +541,28 @@ async def er_stat(ctx, player_id: str):
 
     embed.set_image(url="attachment://mmr_stats.png")
     await ctx.send(file=file, embed=embed)
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """
+    음성 채널 상태 업데이트 이벤트 핸들러
+    """
+    # 봇이 음성 채널에 접속해 있는지 확인
+    if member.guild.id in clients:
+        client = clients[member.guild.id]
+        voice_client = client.voice_client
+
+        if voice_client and voice_client.is_connected():
+            # 현재 봇이 있는 음성 채널
+            bot_channel = voice_client.channel
+
+            # 음성 채널에 남아 있는 멤버 확인
+            remaining_members = [m for m in bot_channel.members if not m.bot]
+
+            # 봇만 남아 있다면 음성 채널 떠나기
+            if len(remaining_members) == 0:
+                await client.leave_voice_channel()
+                print(f"👋 음성 채널을 떠났습니다: {bot_channel}")
 
 load_dotenv()
 if __name__ == "__main__":
