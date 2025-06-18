@@ -14,8 +14,8 @@ from discord import File
 from discord.ext import commands
 
 from dotenv import load_dotenv
-from watchdog.events import FileSystemEventHandler
-from watchdog.observers import Observer
+#from watchdog.events import FileSystemEventHandler
+#from watchdog.observers import Observer
 
 from Modules.KonglishResolver import convert_mixed_string, english_ratio_excluding_code_and_urls
 from Modules.LanguageResearcher import detect_text_type
@@ -37,36 +37,36 @@ if raw_ids:
 # -----------------------------------------
 # 파일 변경 감지 핸들러
 # -----------------------------------------
-class EnvFileHandler(FileSystemEventHandler):
-    def __init__(self, bot):
-        self.bot = bot
+# class EnvFileHandler(FileSystemEventHandler):
+#     def __init__(self, bot):
+#         self.bot = bot
 
-    def on_modified(self, event):
-        if event.src_path.endswith('.env'):
-            print("\n🔔 .env 파일 변경 감지!")
-            load_dotenv(override=True)
+#     def on_modified(self, event):
+#         if event.src_path.endswith('.env'):
+#             print("\n🔔 .env 파일 변경 감지!")
+#             load_dotenv(override=True)
 
-            raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
-            new_ids = []
-            if raw_ids:  # 검증
-                try:
-                    new_ids = [int(x.strip()) for x in raw_ids.split(',') if x.strip()]
-                except ValueError as e:
-                    print(f"⚠️ 잘못된 사용자 ID 형식: {e}")
-                    return
+#             raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
+#             new_ids = []
+#             if raw_ids:  # 검증
+#                 try:
+#                     new_ids = [int(x.strip()) for x in raw_ids.split(',') if x.strip()]
+#                 except ValueError as e:
+#                     print(f"⚠️ 잘못된 사용자 ID 형식: {e}")
+#                     return
 
-            global BLOCKED_USER_IDS
-            BLOCKED_USER_IDS = new_ids
-            print(f"🔄 차단 목록 업데이트 완료: {BLOCKED_USER_IDS}")
+#             global BLOCKED_USER_IDS
+#             BLOCKED_USER_IDS = new_ids
+#             print(f"🔄 차단 목록 업데이트 완료: {BLOCKED_USER_IDS}")
 
-async def setup_file_watcher(bot):
-    observer = Observer()
-    event_handler = EnvFileHandler(bot)
-    # 실제로는 /app 경로 대신, 현재 .env가 위치한 경로로 지정
-    observer.schedule(event_handler, path='.', recursive=False)
-    observer.start()
-    print("✅ 파일 감시기 시작됨")
-    return observer
+# async def setup_file_watcher(bot):
+#     observer = Observer()
+#     event_handler = EnvFileHandler(bot)
+#     # 실제로는 /app 경로 대신, 현재 .env가 위치한 경로로 지정
+#     observer.schedule(event_handler, path='.', recursive=False)
+#     observer.start()
+#     print("✅ 파일 감시기 시작됨")
+#     return observer
 
 
 # -----------------------------------------
