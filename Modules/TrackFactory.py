@@ -416,6 +416,7 @@ class TrackFactory:
         """업로드된 파일로부터 트랙 생성"""
         return await MemoryAudioSource.from_upload(file)
 
+
     @staticmethod
     async def download_track_to_memory(source, url_or_id: str, quality="NORMAL"):
         try:

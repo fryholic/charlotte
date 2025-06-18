@@ -14,6 +14,8 @@ from discord import File
 from discord.ext import commands
 
 from dotenv import load_dotenv
+from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
 from Modules.KonglishResolver import convert_mixed_string, english_ratio_excluding_code_and_urls
 from Modules.LanguageResearcher import detect_text_type
@@ -31,14 +33,17 @@ if raw_ids:
         BLOCKED_USER_IDS = []
 
 # -----------------------------------------
+
 # 봇 및 클라이언트 관리
 # -----------------------------------------
 clients : dict[int, ServerClient] = {}
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
 
+
 @bot.event
 async def on_ready():
     print(f'{bot.user.name}이 성공적으로 로그인!')
+    # bot.file_observer = await setup_file_watcher(bot)
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="?help"))
 
     for guild in bot.guilds:
@@ -131,6 +136,7 @@ async def play(ctx, *, url=None):
     if ctx.guild.id not in clients:
         clients[ctx.guild.id] = ServerClient(ctx.guild.id)
 
+
     client = clients[ctx.guild.id]
 
     try:
@@ -155,6 +161,7 @@ async def play(ctx, *, url=None):
             if not url:
                 return await ctx.send("URL을 입력하거나 오디오 파일을 업로드해주세요!")
 
+
             async with ctx.typing():
                 try:
                     players = await TrackFactory.from_url(url)
@@ -170,7 +177,6 @@ async def play(ctx, *, url=None):
 
         # 큐에 추가
         client.audio_scheduler.enqueue_list(players)
-
         # 사용자에게 알림
         added_titles = "\n".join([f"- {p.title}" for p in players])
         await ctx.send(f"**🎶 {len(players)}곡 추가됨:**\n{added_titles}")
