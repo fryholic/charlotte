@@ -3,60 +3,72 @@ import io
 import aiohttp
 import discord
 import yt_dlp as youtube_dl
-from mutagen import File as MutagenFile
 import sys
 import os
 import tempfile
+import logging
 from pathlib import Path
+from mutagen import File as MutagenFile
+from dotenv import load_dotenv
+from Modules.getMetadata import get_filtered_data, parse_uri, SpotifyInvalidUrlException
+
+# Spotify/librespot imports
+from librespot.core import Session
+from librespot.metadata import TrackId
+from librespot.audio.decoders import AudioQuality, VorbisOnlyAudioQuality
+from deezspot.spotloader.spotify_settings import qualities
+
+# deezspot imports
+from deezspot.easy_spoty import Spo
+from deezspot.models import Preferences
+from deezspot.spotloader.__download__ import DW_TRACK, Download_JOB
+from deezspot.libutils.utils import link_is_valid, get_ids
+from deezspot.spotloader.__spo_api__ import tracking, convert_to_date
 
 # deezspot 패키지 경로 추가
-sys.path.append(str(Path(__file__).parent.parent.parent / "deezspot"))
+if os.path.exists('/home/pi/deezspot'):
+    deezspot_path = Path('/home/pi/deezspot')
+elif os.path.exists('/deezspot'):
+    deezspot_path = Path('/deezspot')
+else:
+    deezspot_path = Path(__file__).parent.parent.parent / "deezspot"
 
-try:
-    from hashlib import md5 as __md5
-    from binascii import a2b_hex as __a2b_hex, b2a_hex as __b2a_hex
-    from Crypto.Cipher.Blowfish import new as __newBlowfish, MODE_CBC as __MODE_CBC
-    from Crypto.Cipher.AES import new as __newAES, MODE_ECB as __MODE_ECB
-except ImportError:
-    print("Warning: Crypto library not available, Deezer download will not work")
-    __md5 = None
-    __a2b_hex = None
-    __b2a_hex = None
-    __newBlowfish = None
-    __MODE_CBC = None
-    __newAES = None
-    __MODE_ECB = None
-
-
-
-#from .SpotifyMetadata import parse_uri, get_filtered_data, SpotifyInvalidUrlException
-#from .SpotifyDownloader import get_spotify_download_link, get_data
-
-#from Modules.getMetadata_v2 import get_filtered_data, parse_uri, SpotifyInvalidUrlException
-from Modules.getMetadata import get_filtered_data, parse_uri, SpotifyInvalidUrlException
-from Modules.getToken_v1 import main as get_token_fast
-# from Modules.getToken import main as get_token_slow
-from Modules.spotify import Downloader, TokenManager
+sys.path.append(str(deezspot_path))
+print(f"Added deezspot path: {deezspot_path}")
 
 # deezspot 모듈 import
+SPOTIFY_AVAILABLE = False
 try:
-    import deezspot
-    from deezspot.spotloader import SpoLogin
-    from deezspot.deezloader.dee_api import API
-    from deezspot.deezloader.deegw_api import API_GW
-    from deezspot.deezloader.deezer_settings import qualities
-    from deezspot.deezloader.__download_utils__ import gen_song_hash
-    from deezspot.libutils.utils import set_path
-    from deezspot.models import Track as DeezerTrack
-    from deezspot.spotloader.__download__ import EASY_DW
-    from deezspot.models import Preferences
-    DEEZER_AVAILABLE = True
-except ImportError:
-    print("Warning: deezspot not available")
-    DEEZER_AVAILABLE = False
+    # spotipy 패키지가 있는지 확인
+    try:
+        import spotipy
+    except ImportError:
+        print("Warning: spotipy module not installed")
+        raise ImportError("spotipy module not installed")
+        
+    if os.path.exists(deezspot_path):
+        # 기본 deezspot 모듈 로딩
+        import deezspot
+        print("✅ Successfully imported deezspot base module")
+        
+        # 핵심 모듈 로딩
+        from deezspot.spotloader import SpoLogin
+        from deezspot.libutils.utils import link_is_valid, get_ids
+        from deezspot.spotloader.__spo_api__ import tracking
+        from deezspot.spotloader.__download__ import EASY_DW
+        from deezspot.models import Preferences
+            
+        print("✅ Successfully imported all deezspot modules")
+        SPOTIFY_AVAILABLE = True
+    else:
+        print(f"Warning: deezspot directory not found at {deezspot_path}")
+except ImportError as e:
+    print(f"Warning: deezspot import failed: {e}")
+    SPOTIFY_AVAILABLE = False
+    
+print(f"SPOTIFY_AVAILABLE status: {SPOTIFY_AVAILABLE}")
 
 # 환경변수 로딩
-from dotenv import load_dotenv
 load_dotenv()
 
 # -----------------------------------------
@@ -101,6 +113,128 @@ FFMPEG_OPTIONS_MEMORYAUDIOSOURCE = {
 }
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
+
+# -----------------------------------------
+# Spotify 다운로드 유틸리티
+# -----------------------------------------
+
+async def download_spotify_to_buffer(spotify_url):
+    """Spotify URL을 메모리 버퍼로 직접 다운로드"""
+    if not SPOTIFY_AVAILABLE:
+        raise Exception("Spotify functionality not available")
+    
+    try:
+        # Spotify 인증 초기화
+        client_id = os.getenv('SPOTIFY_CLIENT_ID')
+        client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
+        
+        if not client_id or not client_secret:
+            raise Exception("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables must be set")
+        
+        print(f"Initializing Spotify API with client_id={client_id[:5]}...")
+        
+        # Spo 클래스 생성 및 초기화
+        spo = Spo(client_id=client_id, client_secret=client_secret)
+        
+        # librespot 세션 초기화
+        credentials_path = None
+        possible_paths = [
+            os.getenv('SPOTIFY_CREDENTIALS_PATH'),
+            '/app/credentials.json',  # Docker path
+            '/home/pi/charlotte/credentials.json',  # Local path
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'credentials.json')  # Relative path
+        ]
+        
+        for path in possible_paths:
+            if path and os.path.exists(path):
+                credentials_path = path
+                break
+                
+        if not credentials_path:
+            raise Exception("Cannot find Spotify credentials.json file")
+            
+        print(f"Using Spotify credentials from: {credentials_path}")
+        
+        # librespot 세션 생성 및 초기화
+        session_builder = Session.Builder()
+        session_builder.conf.stored_credentials_file = credentials_path
+        session = session_builder.stored_file().create()
+        Download_JOB(session)  # 여기서 세션을 Download_JOB에 설정
+        
+        # Spotify URL 검증 및 메타데이터 추출
+        link_is_valid(spotify_url)
+        track_id = get_ids(spotify_url)
+        
+        print(f"Fetching metadata for track ID: {track_id}")
+        song_metadata = tracking(track_id)
+        
+        if not song_metadata:
+            raise Exception("Failed to get track metadata from Spotify")
+            
+        print(f"Successfully retrieved metadata for: {song_metadata.get('music', 'Unknown')}")
+        
+        # 필수 메타데이터 필드 확인
+        if not song_metadata or 'music' not in song_metadata or 'artist' not in song_metadata:
+            json_track = Spo.get_track(track_id)
+            # 메타데이터가 누락된 경우 수동으로 구성
+            song_metadata = {
+                'music': json_track.get('name', 'Unknown Title'),
+                'artist': ' & '.join(artist['name'] for artist in json_track.get('artists', [])) or 'Unknown Artist',
+                'album': json_track.get('album', {}).get('name', 'Unknown Album'),
+                'tracknum': json_track.get('track_number', 1),
+                'discnum': json_track.get('disc_number', 1),
+                'year': convert_to_date(json_track.get('album', {}).get('release_date', '')),
+                'duration': json_track.get('duration_ms', 0) // 1000,
+                'ids': track_id
+            }
+
+            if 'images' in json_track.get('album', {}):
+                song_metadata['image'] = json_track['album']['images'][0]['url']
+        
+        # 설정 초기화
+        preferences = Preferences()
+        preferences.link = spotify_url
+        preferences.ids = track_id
+        preferences.song_metadata = song_metadata
+        preferences.quality_download = "HIGH"
+        preferences.output_dir = "./temp"  # 임시 디렉토리
+        preferences.recursive_quality = False
+        preferences.recursive_download = False
+        preferences.not_interface = True  # 진행률 출력 비활성화
+        preferences.method_save = 0  # 간단한 경로 형식
+        preferences.is_episode = False
+
+        # 트랙 다운로드
+        track = DW_TRACK(preferences).dw()
+        if not track or not track.success or not track.song_path:
+            raise Exception("Failed to download track")
+
+        # 파일을 메모리 버퍼로 읽기
+        buffer = io.BytesIO()
+        with open(track.song_path, 'rb') as f:
+            buffer.write(f.read())
+        buffer.seek(0)  # 버퍼 위치를 시작으로 되돌림
+
+        # 임시 파일 정리
+        if os.path.exists(track.song_path):
+            os.remove(track.song_path)
+            try:
+                os.rmdir(os.path.dirname(track.song_path))
+            except:
+                pass  # 디렉토리가 비어있지 않거나 존재하지 않을 수 있음
+
+        # 메타데이터 생성
+        metadata = {
+            'title': song_metadata.get('music', 'Unknown'),
+            'artist': song_metadata.get('artist', 'Unknown'),
+            'duration': song_metadata.get('duration', 0)
+        }
+        
+        return buffer, metadata
+        
+    except Exception as e:
+        print(f"Memory download error: {str(e)}")
+        raise Exception(f"Failed to download to memory: {str(e)}")
 
 class YouTubeSource(discord.FFmpegOpusAudio):
     def __init__(self, source, *, data):
@@ -191,81 +325,86 @@ class MemoryAudioSource(discord.FFmpegOpusAudio):
                 'duration': 0
             }
         
-        return [cls(buffer, metadata)]    
+        return [cls(buffer, metadata)]
+        
     @classmethod
-    async def from_spotify_url(cls, track, token_manager):
+    async def from_spotify_url(cls, track):
         """Spotify URL에서 deezspot을 통해 버퍼로 오디오 다운로드"""
-        if not DEEZER_AVAILABLE:
-            raise Exception("deezspot functionality not available")
+        if not SPOTIFY_AVAILABLE:
+            raise Exception("Spotify functionality not available")
         
         try:
-            # Spotify 트랙 URL 생성 (track 객체에서 URL 추출)
-            spotify_url = getattr(track, 'external_urls', {}).get('spotify')
-            if not spotify_url:
-                # track 객체에서 ID를 사용하여 URL 생성
-                track_id = getattr(track, 'id', None)
-                if track_id:
-                    spotify_url = f"https://open.spotify.com/track/{track_id}"
+            # Spotify 트랙 정보에서 URL 또는 ID 추출
+            spotify_url = None
+            track_id = None
+            
+            # track이 문자열인 경우 (URL인 경우)
+            if isinstance(track, str):
+                if 'spotify.com' in track:
+                    spotify_url = track
                 else:
-                    raise Exception("Cannot extract Spotify URL from track")
+                    track_id = track
+            else:
+                # track이 객체인 경우
+                spotify_url = getattr(track, 'external_urls', {}).get('spotify')
+                if not spotify_url:
+                    track_id = getattr(track, 'id', None)
             
-            # 버퍼로 다운로드
-            loop = asyncio.get_event_loop()
-            buffer, metadata = await loop.run_in_executor(None, download_spotify_to_buffer, spotify_url)
+            # URL이 없고 ID가 있으면 URL 생성
+            if not spotify_url and track_id:
+                spotify_url = f"https://open.spotify.com/track/{track_id}"
+                
+            if not spotify_url:
+                raise Exception("Cannot extract Spotify URL or ID from track")
+                
+            print(f"Processing Spotify URL: {spotify_url}")
             
-            return cls(buffer, metadata)
+            # 데이터 다운로드
+            buffer, metadata = await download_spotify_to_buffer(spotify_url)
+            return [cls(buffer, metadata)]
             
         except Exception as e:
             print(f"Spotify download error: {str(e)}")
             raise Exception(f"Failed to download from Spotify: {str(e)}")
 
 class TrackFactory:
-    # @staticmethod
-    # async def initialize():
-    #     global token_manager
-    #     if token_manager is None:
-    #         token_manager = TokenManager()
-    #         asyncio.create_task(token_manager.start())
-    #         print("✅ TokenManager 초기화 및 시작됨")    @staticmethod
+    @staticmethod
     async def identify_source(query):
         """쿼리 타입을 식별하고 적절한 소스 생성"""
         try:
-            # Spotify URL 처리
-            url_info = parse_uri(query)
-            if url_info['type'] in ['track', 'album', 'playlist']:
-                # 토큰매니저 초기화
-                token_manager = TokenManager()
+            # YouTube URL 확인
+            if 'youtube.com/' in query or 'youtu.be/' in query:
+                print(f"YouTube URL detected: {query}")
+                return await YouTubeSource.from_url(query)
                 
-                # 새로운 Downloader 인스턴스 생성
-                downloader = Downloader(
-                    token_manager=token_manager,
-                    output_path=None,
-                    filename_format='title_artist',
-                    use_track_numbers=False,
-                    use_album_subfolders=False
-                )
-                
-                # 트랙 목록 가져오기
-                tracks, _, _ = await downloader.fetch_tracks(query)
-                if tracks:
-                    first_track = tracks[0]
-                    return [await MemoryAudioSource.from_spotify_url(first_track, token_manager)]
-                    
-        except SpotifyInvalidUrlException:
-            # Spotify URL이 아닌 경우, YouTube 처리로 넘어감
-            pass
-        except Exception as e:
-            print(f"Spotify 처리 오류: {str(e)}")
-            # 오류 발생 시 YouTube 처리로 넘어감
-            pass
-
-        # YouTube URL 또는 검색어 처리
-        if 'youtube.com/' in query or 'youtu.be/' in query:
-            return await YouTubeSource.from_url(query)
-        elif query:  # 검색어로 처리
+            # Spotify URL 확인
+            if 'spotify.com/' in query or 'open.spotify.com/' in query:
+                print(f"Spotify URL detected: {query}")
+                try:
+                    url_info = parse_uri(query)
+                    if url_info['type'] in ['track', 'album', 'playlist']:
+                        if SPOTIFY_AVAILABLE:
+                            try:
+                                print(f"Attempting Spotify download for: {query}")
+                                return await MemoryAudioSource.from_spotify_url(query)
+                            except Exception as direct_error:
+                                print(f"Spotify download failed: {direct_error}")
+                                raise Exception(f"Spotify 트랙을 다운로드할 수 없습니다: {direct_error}")
+                        else:
+                            raise Exception("Spotify 다운로드 기능을 사용할 수 없습니다")
+                except SpotifyInvalidUrlException:
+                    raise Exception("잘못된 Spotify URL입니다")
+                except Exception as e:
+                    print(f"Spotify 처리 오류: {str(e)}")
+                    raise Exception(f"Spotify 트랙 처리 중 오류 발생: {str(e)}")
+            
+            # 일반 검색어인 경우 YouTube 검색
+            print(f"Searching YouTube for query: {query}")
             return await YouTubeSource.from_url(f"ytsearch:{query}")
         
-        return None
+        except Exception as e:
+            print(f"Source identification error: {str(e)}")
+            raise e
 
     @classmethod
     async def from_url(cls, url, *, loop=None):
@@ -277,184 +416,124 @@ class TrackFactory:
         """업로드된 파일로부터 트랙 생성"""
         return await MemoryAudioSource.from_upload(file)
 
-# -----------------------------------------
-# Deezer 복호화 유틸리티 함수들
-# -----------------------------------------
-
-def __calcbfkey(songid):
-    """Deezer 블로우피시 키 계산"""
-    if not __md5:
-        raise Exception("Crypto library not available")
-    
-    __secret_key = "g4el58wc0zvf9na1"
-    h = __md5(songid.encode()).hexdigest()
-    
-    bfkey = "".join(
-        chr(
-            ord(h[i]) ^ ord(h[i + 16]) ^ ord(__secret_key[i])
-        )
-        for i in range(16)
-    )
-    return bfkey
-
-def __blowfishDecrypt(data, key):
-    """블로우피시 복호화"""
-    if not __newBlowfish:
-        raise Exception("Crypto library not available")
-    
-    __idk = __a2b_hex("0001020304050607")
-    c = __newBlowfish(key.encode(), __MODE_CBC, __idk)
-    return c.decrypt(data)
-
-def decrypt_to_buffer(content, key):
-    """
-    Deezer 암호화된 콘텐츠를 버퍼로 복호화
-    파일에 저장하지 않고 메모리 버퍼로 반환
-    """
-    if not DEEZER_AVAILABLE or not __md5:
-        raise Exception("Deezer decryption not available")
-    
-    key = __calcbfkey(key)
-    buffer = io.BytesIO()
-    seg = 0
-    
-    for data in content:
-        if ((seg % 3) == 0) and (len(data) == 2048):
-            data = __blowfishDecrypt(data, key)
-        
-        buffer.write(data)
-        seg += 1
-    
-    buffer.seek(0)
-    return buffer
-
-# -----------------------------------------
-# Spotify 클라이언트 설정
-# -----------------------------------------
-
-def get_spotify_client():
-    """환경변수에서 Spotify 클라이언트 설정을 가져와서 SpoLogin 인스턴스 생성"""
-    if not DEEZER_AVAILABLE:
-        raise Exception("deezspot not available")
-    
-    credentials_path = os.getenv('SPOTIFY_CREDENTIALS_PATH', './credentials.json')
-    client_id = os.getenv('SPOTIFY_CLIENT_ID')
-    client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
-    
-    if not client_id or not client_secret:
-        raise Exception("Spotify credentials not found in environment variables")
-    
-    if not os.path.exists(credentials_path):
-        raise Exception(f"Credentials file not found: {credentials_path}")
-    
-    return SpoLogin(
-        credentials_path=credentials_path,
-        client_id=client_id,
-        client_secret=client_secret
-    )
-
-def download_spotify_to_buffer(spotify_url):
-    """Spotify URL을 메모리 버퍼로 직접 다운로드 (임시파일 없이)"""
-    if not DEEZER_AVAILABLE:
-        raise Exception("deezspot not available")
-    
-    try:
-        import requests
-        
-        # deezspot 모듈들 import (try-except로 처리)
+    @staticmethod
+    async def download_track_to_memory(source, url_or_id: str, quality="NORMAL"):
         try:
-            from deezspot.spotloader.__spo_api__ import link_is_valid, get_ids, tracking
-            from deezspot.deezloader.__download__ import Download_JOB
-            from deezspot.deezloader.__utils__ import check_track_ids
-        except ImportError as ie:
-            print(f"Warning: Could not import deezspot modules: {ie}")
-            raise Exception("deezspot modules not available")
-        
-        # Spotify URL 검증 및 메타데이터 추출
-        link_is_valid(spotify_url)
-        ids = get_ids(spotify_url)
-        song_metadata = tracking(ids)
-        
-        # 커스텀 다운로드: 메모리에서 처리
-        buffer = download_track_to_memory(song_metadata)
-        
-        # 메타데이터 생성
-        metadata = {
-            'title': song_metadata.get('music', 'Unknown'),
-            'artist': song_metadata.get('artist', 'Unknown'),
-            'duration': song_metadata.get('duration', 0)
-        }
-        
-        return buffer, metadata
-        
-    except Exception as e:
-        print(f"Memory download error: {str(e)}")
-        raise Exception(f"Failed to download to memory: {str(e)}")
+            if source == "spotify":
+                # Get the Spotify track ID if a full URL was provided
+                if "spotify.com" in url_or_id:
+                    track_id = url_or_id.split("/")[-1].split("?")[0]
+                else:
+                    track_id = url_or_id
 
-def download_track_to_memory(song_metadata):
-    """트랙을 메모리 버퍼로 직접 다운로드 (파일 저장 없이)"""
-    try:
-        import requests
-        from deezspot.deezloader.__download__ import Download_JOB
-        from deezspot.deezloader.__utils__ import check_track_ids
-        
-        # Download_JOB의 내부 로직을 직접 사용
-        download_job = Download_JOB()
-        
-        # 다운로드 URL 정보 가져오기
-        url_info = download_job._Download_JOB__get_url(song_metadata, "NORMAL")
-        
-        if not url_info or 'media' not in url_info:
-            raise Exception("No download URL available")
-        
-        # 실제 다운로드 URL 추출
-        media_info = url_info['media'][0] if url_info['media'] else None
-        if not media_info or 'sources' not in media_info:
-            raise Exception("No media sources available")
-        
-        download_url = media_info['sources'][0]['url']
-        
-        # 스트리밍으로 암호화된 오디오 다운로드
-        response = requests.get(download_url, stream=True, timeout=30)
-        response.raise_for_status()
-        
-        # 암호화된 청크들을 메모리에 수집
-        encrypted_chunks = []
-        for chunk in response.iter_content(chunk_size=2048):
-            if chunk:
-                encrypted_chunks.append(chunk)
-        
-        print(f"Downloaded {len(encrypted_chunks)} encrypted chunks")
-        
-        # 복호화 키 생성
-        fallback_ids = check_track_ids(song_metadata)
-        
-        # 메모리에서 복호화하여 버퍼로 반환
-        return decrypt_audio_to_buffer(encrypted_chunks, fallback_ids)
-        
-    except Exception as e:
-        print(f"Track memory download error: {str(e)}")
-        raise
+                # Initialize Spotify API with client credentials
+                Spo(client_id=os.getenv('SPOTIFY_CLIENT_ID'), client_secret=os.getenv('SPOTIFY_CLIENT_SECRET'))
 
-def decrypt_audio_to_buffer(encrypted_content, fallback_ids):
-    """암호화된 오디오 콘텐츠를 메모리에서 직접 복호화하여 버퍼로 반환"""
-    if not DEEZER_AVAILABLE or not __md5:
-        raise Exception("Decryption not available")
-    
-    key = __calcbfkey(fallback_ids)
-    buffer = io.BytesIO()
-    seg = 0
-    
-    for data in encrypted_content:
-        if ((seg % 3) == 0) and (len(data) == 2048):
-            data = __blowfishDecrypt(data, key)
-        
-        buffer.write(data)
-        seg += 1
-    
-    buffer.seek(0)
-    return buffer
+                # Get track metadata
+                song_metadata = tracking(track_id)
+                
+                # Ensure required metadata fields are present
+                if not song_metadata or 'music' not in song_metadata or 'artist' not in song_metadata:
+                    json_track = Spo.get_track(track_id)
+                    # Manually construct metadata if original tracking fails
+                    song_metadata = {
+                        'music': json_track.get('name', 'Unknown Title'),
+                        'artist': ' & '.join(artist['name'] for artist in json_track.get('artists', [])) or 'Unknown Artist',
+                        'album': json_track.get('album', {}).get('name', 'Unknown Album'),
+                        'tracknum': json_track.get('track_number', 1),
+                        'discnum': json_track.get('disc_number', 1),
+                        'year': convert_to_date(json_track.get('album', {}).get('release_date', '')),
+                        'duration': json_track.get('duration_ms', 0) // 1000,
+                        'ids': track_id
+                    }
 
-# -----------------------------------------
-# 토큰 관리
-# -----------------------------------------
+                    if 'images' in json_track.get('album', {}):
+                        song_metadata['image'] = json_track['album']['images'][0]['url']
+
+                # Set up preferences for download
+                preferences = Preferences()
+                preferences.link = f"https://open.spotify.com/track/{track_id}"
+                preferences.ids = track_id 
+                preferences.song_metadata = song_metadata
+                preferences.quality_download = quality
+                preferences.output_dir = "./temp"  # Temporary directory
+                preferences.recursive_quality = False
+                preferences.recursive_download = False
+                preferences.not_interface = True  # Disable progress output
+                preferences.method_save = 0  # Simple path format
+                preferences.is_episode = False
+
+                # Download track
+                track = DW_TRACK(preferences).dw()
+                if not track or not track.success or not track.song_path:
+                    raise Exception("Failed to download track")
+
+                # Read the file into memory
+                with open(track.song_path, 'rb') as f:
+                    audio_data = f.read()
+
+                # Clean up the temp file
+                if os.path.exists(track.song_path):
+                    os.remove(track.song_path)
+                    try:
+                        os.rmdir(os.path.dirname(track.song_path))
+                    except:
+                        pass  # Directory might not be empty or might not exist
+
+                return audio_data
+            
+            elif source == "youtube":
+                if "youtu" not in url_or_id:  # If we got video ID instead of URL
+                    url = f"https://youtube.com/watch?v={url_or_id}"
+                else:
+                    url = url_or_id
+
+                # Extract audio to memory using yt-dlp
+                ydl_opts = {
+                    'format': 'bestaudio/best',
+                    'postprocessors': [{
+                        'key': 'FFmpegExtractAudio',
+                        'preferredcodec': 'opus',
+                    }],
+                }
+                
+                with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+                    try:
+                        # Download to memory buffer instead of file
+                        buffer = io.BytesIO()
+                        
+                        # Get video info first
+                        info = ydl.extract_info(url, download=False)
+                        
+                        # Create custom progress hook to write to memory
+                        def progress_hook(d):
+                            if d['status'] == 'finished':
+                                # Get the converted file path
+                                file_path = d['filename']
+                                # Read the file into our buffer
+                                with open(file_path, 'rb') as f:
+                                    buffer.write(f.read())
+                                # Delete the temporary file
+                                os.remove(file_path)
+                                try:
+                                    # Try to remove the directory if empty
+                                    os.rmdir(os.path.dirname(file_path))
+                                except:
+                                    pass
+
+                        # Add our custom progress hook
+                        ydl_opts['progress_hooks'] = [progress_hook]
+                        
+                        # Perform the download
+                        ydl.download([url])
+                        
+                        # Return the buffer contents
+                        return buffer.getvalue()
+                        
+                    except Exception as e:
+                        logging.error(f"YouTube download failed: {str(e)}")
+                        raise e
+
+        except Exception as e:
+            logging.error(f"Download error: {str(e)}")
+            raise Exception(f"Failed to download track: {str(e)}")
