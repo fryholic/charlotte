@@ -11,10 +11,10 @@ services:
       #- ./.env:/app/.env
     volumes:
       - type: bind
-        source: /home/pi/charlotte/
+        source: /home/mizore/charlotte/
         target: /app
       - type: bind
-        source: /home/pi/deezspot/
+        source: /home/mizore/deezspot/
         target: /deezspot
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
@@ -22,3 +22,4 @@ services:
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
       - SPOTIFY_CREDENTIALS_PATH=/app/credentials.json
+
