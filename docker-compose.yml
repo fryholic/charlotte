@@ -1,19 +1,24 @@
-version: '3'
-
 services:
   charlotte:
     build: .
     container_name: charlotte-bot
     restart: unless-stopped
     shm_size: '2gb'
-    command: python charlotte_bot.py
+    command: charlotte_bot.py
+    entrypoint: ["/app/docker-entrypoint.sh"]
     #volumes:
       #- ./:/app
       #- ./.env:/app/.env
     volumes:
       - type: bind
-        source: /home/mizore/charlotte/
-        target: /app  
+        source: /home/pi/charlotte/
+        target: /app
+      - type: bind
+        source: /home/pi/deezspot/
+        target: /deezspot
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - BLOCKED_USER_IDS=${BLOCKED_USER_IDS}
+      - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
+      - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
+      - SPOTIFY_CREDENTIALS_PATH=/app/credentials.json
