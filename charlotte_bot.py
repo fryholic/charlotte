@@ -22,8 +22,6 @@ from Modules.LanguageResearcher import detect_text_type
 from Modules.ServerClient import ServerClient
 from Modules.TrackFactory import TrackFactory
 
-from Modules.spotify import TokenManager
-
 # 차단 목록 초기화
 raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
 BLOCKED_USER_IDS = []
@@ -35,53 +33,18 @@ if raw_ids:
         BLOCKED_USER_IDS = []
 
 # -----------------------------------------
-# 파일 변경 감지 핸들러
-# -----------------------------------------
-class EnvFileHandler(FileSystemEventHandler):
-    def __init__(self, bot):
-        self.bot = bot
 
-    def on_modified(self, event):
-        if event.src_path.endswith('.env'):
-            print("\n🔔 .env 파일 변경 감지!")
-            load_dotenv(override=True)
-
-            raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
-            new_ids = []
-            if raw_ids:  # 검증
-                try:
-                    new_ids = [int(x.strip()) for x in raw_ids.split(',') if x.strip()]
-                except ValueError as e:
-                    print(f"⚠️ 잘못된 사용자 ID 형식: {e}")
-                    return
-
-            global BLOCKED_USER_IDS
-            BLOCKED_USER_IDS = new_ids
-            print(f"🔄 차단 목록 업데이트 완료: {BLOCKED_USER_IDS}")
-
-async def setup_file_watcher(bot):
-    observer = Observer()
-    event_handler = EnvFileHandler(bot)
-    # 실제로는 /app 경로 대신, 현재 .env가 위치한 경로로 지정
-    observer.schedule(event_handler, path='.', recursive=False)
-    observer.start()
-    print("✅ 파일 감시기 시작됨")
-    return observer
-
-
-# -----------------------------------------
 # 봇 및 클라이언트 관리
 # -----------------------------------------
 clients : dict[int, ServerClient] = {}
-bot = commands.Bot(command_prefix='?', intents=discord.Intents.all())
+bot = commands.Bot(command_prefix='!', intents=discord.Intents.all())
+
 
 @bot.event
 async def on_ready():
     print(f'{bot.user.name}이 성공적으로 로그인!')
     # bot.file_observer = await setup_file_watcher(bot)
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="?help"))
-
-    # await TrackFactory.initialize()
 
     for guild in bot.guilds:
         if guild.id not in clients:
@@ -173,6 +136,7 @@ async def play(ctx, *, url=None):
     if ctx.guild.id not in clients:
         clients[ctx.guild.id] = ServerClient(ctx.guild.id)
 
+
     client = clients[ctx.guild.id]
 
     try:
@@ -197,6 +161,7 @@ async def play(ctx, *, url=None):
             if not url:
                 return await ctx.send("URL을 입력하거나 오디오 파일을 업로드해주세요!")
 
+
             async with ctx.typing():
                 try:
                     players = await TrackFactory.from_url(url)
@@ -212,7 +177,6 @@ async def play(ctx, *, url=None):
 
         # 큐에 추가
         client.audio_scheduler.enqueue_list(players)
-
         # 사용자에게 알림
         added_titles = "\n".join([f"- {p.title}" for p in players])
         await ctx.send(f"**🎶 {len(players)}곡 추가됨:**\n{added_titles}")

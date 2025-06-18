@@ -3,3 +3,5 @@
 downloads/
 __pycache__/
 token.txt
+credentials.json
+.cach
