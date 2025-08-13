@@ -14,7 +14,7 @@ services:
         source: /home/mizore/charlotte/
         target: /app
       - type: bind
-        source: /home/mizore/deezspot/
+        source: /home/mizore/charlotte/deezspot
         target: /deezspot
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}

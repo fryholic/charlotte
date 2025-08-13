@@ -26,8 +26,8 @@ from deezspot.libutils.utils import link_is_valid, get_ids
 from deezspot.spotloader.__spo_api__ import tracking, convert_to_date
 
 # deezspot 패키지 경로 추가
-if os.path.exists('/home/pi/deezspot'):
-    deezspot_path = Path('/home/pi/deezspot')
+if os.path.exists('/home/mizore/deezspot'):
+    deezspot_path = Path('/home/mizore/deezspot')
 elif os.path.exists('/deezspot'):
     deezspot_path = Path('/deezspot')
 else:
@@ -96,7 +96,7 @@ ytdl_format_options = {
 
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-     'options': '-vn -b:a 320k -ac 2 -ar 48000 -af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
+     'options': '-vn -b:a 320k -ac 2 -ar 48000'
 }
 
 FFMPEG_OPTIONS_MEMORYAUDIOSOURCE = {
@@ -108,7 +108,6 @@ FFMPEG_OPTIONS_MEMORYAUDIOSOURCE = {
         '-c:a libopus '  # 오디오 코덱 지정
         '-b:a 320k '     # 비트레이트 설정
         '-ar 48000 '     # 샘플 레이트 강제 지정
-        '-af dynaudnorm=f=500:g=31:p=0.95:m=10:s=0'
     )
 }
 
@@ -120,22 +119,25 @@ ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 
 async def download_spotify_to_buffer(spotify_url):
     """Spotify URL을 메모리 버퍼로 직접 다운로드"""
+    import traceback
     if not SPOTIFY_AVAILABLE:
+        print("[DEBUG] SPOTIFY_AVAILABLE is False")
         raise Exception("Spotify functionality not available")
-    
+
     try:
+        print(f"[DEBUG] Called download_spotify_to_buffer with spotify_url={spotify_url}")
         # Spotify 인증 초기화
         client_id = os.getenv('SPOTIFY_CLIENT_ID')
         client_secret = os.getenv('SPOTIFY_CLIENT_SECRET')
-        
+        print(f"[DEBUG] Loaded client_id={client_id}, client_secret={'set' if client_secret else 'not set'}")
+
         if not client_id or not client_secret:
+            print("[DEBUG] SPOTIFY_CLIENT_ID or SPOTIFY_CLIENT_SECRET not set")
             raise Exception("SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET environment variables must be set")
-        
-        print(f"Initializing Spotify API with client_id={client_id[:5]}...")
-        
-        # Spo 클래스 생성 및 초기화
+
+        print(f"[DEBUG] Initializing Spo with client_id={client_id[:5]}")
         spo = Spo(client_id=client_id, client_secret=client_secret)
-        
+
         # librespot 세션 초기화
         credentials_path = None
         possible_paths = [
@@ -144,38 +146,74 @@ async def download_spotify_to_buffer(spotify_url):
             '/home/pi/charlotte/credentials.json',  # Local path
             os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'credentials.json')  # Relative path
         ]
-        
+        print(f"[DEBUG] Checking possible credentials paths: {possible_paths}")
         for path in possible_paths:
+            print(f"[DEBUG] Checking credentials path: {path}")
             if path and os.path.exists(path):
                 credentials_path = path
+                print(f"[DEBUG] Found credentials at: {credentials_path}")
                 break
-                
+
         if not credentials_path:
+            print("[DEBUG] No credentials.json found in any path")
             raise Exception("Cannot find Spotify credentials.json file")
-            
-        print(f"Using Spotify credentials from: {credentials_path}")
-        
+
+        print(f"[DEBUG] Using Spotify credentials from: {credentials_path}")
+
         # librespot 세션 생성 및 초기화
-        session_builder = Session.Builder()
-        session_builder.conf.stored_credentials_file = credentials_path
-        session = session_builder.stored_file().create()
-        Download_JOB(session)  # 여기서 세션을 Download_JOB에 설정
-        
+        try:
+            session_builder = Session.Builder()
+            session_builder.conf.stored_credentials_file = credentials_path
+            session = session_builder.stored_file().create()
+            Download_JOB(session)  # 여기서 세션을 Download_JOB에 설정
+            print("[DEBUG] librespot session created and Download_JOB set")
+        except Exception as e:
+            print(f"[DEBUG] librespot session creation failed: {e}")
+            traceback.print_exc()
+            raise
+
         # Spotify URL 검증 및 메타데이터 추출
-        link_is_valid(spotify_url)
-        track_id = get_ids(spotify_url)
-        
-        print(f"Fetching metadata for track ID: {track_id}")
-        song_metadata = tracking(track_id)
-        
+        try:
+            link_is_valid(spotify_url)
+            print(f"[DEBUG] link_is_valid passed for {spotify_url}")
+        except Exception as e:
+            print(f"[DEBUG] link_is_valid failed: {e}")
+            traceback.print_exc()
+            raise
+
+        try:
+            track_id = get_ids(spotify_url)
+            print(f"[DEBUG] get_ids returned track_id={track_id}")
+        except Exception as e:
+            print(f"[DEBUG] get_ids failed: {e}")
+            traceback.print_exc()
+            raise
+
+        print(f"[DEBUG] Fetching metadata for track ID: {track_id}")
+        try:
+            song_metadata = tracking(track_id)
+            print(f"[DEBUG] tracking() returned: {song_metadata}")
+        except Exception as e:
+            print(f"[DEBUG] tracking() failed: {e}")
+            traceback.print_exc()
+            raise
+
         if not song_metadata:
+            print("[DEBUG] No song_metadata returned from tracking()")
             raise Exception("Failed to get track metadata from Spotify")
-            
-        print(f"Successfully retrieved metadata for: {song_metadata.get('music', 'Unknown')}")
-        
+
+        print(f"[DEBUG] Successfully retrieved metadata for: {song_metadata.get('music', 'Unknown')}")
+
         # 필수 메타데이터 필드 확인
         if not song_metadata or 'music' not in song_metadata or 'artist' not in song_metadata:
-            json_track = Spo.get_track(track_id)
+            print("[DEBUG] song_metadata missing required fields, calling Spo.get_track")
+            try:
+                json_track = Spo.get_track(track_id)
+                print(f"[DEBUG] Spo.get_track returned: {json_track}")
+            except Exception as e:
+                print(f"[DEBUG] Spo.get_track failed: {e}")
+                traceback.print_exc()
+                raise
             # 메타데이터가 누락된 경우 수동으로 구성
             song_metadata = {
                 'music': json_track.get('name', 'Unknown Title'),
@@ -187,11 +225,11 @@ async def download_spotify_to_buffer(spotify_url):
                 'duration': json_track.get('duration_ms', 0) // 1000,
                 'ids': track_id
             }
-
             if 'images' in json_track.get('album', {}):
                 song_metadata['image'] = json_track['album']['images'][0]['url']
-        
+
         # 설정 초기화
+        print(f"[DEBUG] Setting Preferences for download")
         preferences = Preferences()
         preferences.link = spotify_url
         preferences.ids = track_id
@@ -205,23 +243,43 @@ async def download_spotify_to_buffer(spotify_url):
         preferences.is_episode = False
 
         # 트랙 다운로드
-        track = DW_TRACK(preferences).dw()
+        print(f"[DEBUG] Calling DW_TRACK(preferences).dw()")
+        try:
+            track = DW_TRACK(preferences).dw()
+            print(f"[DEBUG] DW_TRACK(preferences).dw() returned: {track}")
+        except Exception as e:
+            print(f"[DEBUG] DW_TRACK(preferences).dw() failed: {e}")
+            traceback.print_exc()
+            raise
         if not track or not track.success or not track.song_path:
+            print(f"[DEBUG] Downloaded track is invalid: {track}")
             raise Exception("Failed to download track")
 
         # 파일을 메모리 버퍼로 읽기
+        print(f"[DEBUG] Reading downloaded file into buffer: {track.song_path}")
         buffer = io.BytesIO()
-        with open(track.song_path, 'rb') as f:
-            buffer.write(f.read())
-        buffer.seek(0)  # 버퍼 위치를 시작으로 되돌림
+        try:
+            with open(track.song_path, 'rb') as f:
+                buffer.write(f.read())
+            buffer.seek(0)  # 버퍼 위치를 시작으로 되돌림
+        except Exception as e:
+            print(f"[DEBUG] Failed to read downloaded file: {e}")
+            traceback.print_exc()
+            raise
 
         # 임시 파일 정리
+        print(f"[DEBUG] Cleaning up temp file: {track.song_path}")
         if os.path.exists(track.song_path):
-            os.remove(track.song_path)
+            try:
+                os.remove(track.song_path)
+                print(f"[DEBUG] Removed file: {track.song_path}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to remove file: {e}")
             try:
                 os.rmdir(os.path.dirname(track.song_path))
-            except:
-                pass  # 디렉토리가 비어있지 않거나 존재하지 않을 수 있음
+                print(f"[DEBUG] Removed directory: {os.path.dirname(track.song_path)}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to remove directory: {e}")
 
         # 메타데이터 생성
         metadata = {
@@ -229,11 +287,12 @@ async def download_spotify_to_buffer(spotify_url):
             'artist': song_metadata.get('artist', 'Unknown'),
             'duration': song_metadata.get('duration', 0)
         }
-        
+        print(f"[DEBUG] Returning buffer and metadata: {metadata}")
         return buffer, metadata
-        
+
     except Exception as e:
-        print(f"Memory download error: {str(e)}")
+        print(f"[DEBUG] Exception in download_spotify_to_buffer: {str(e)}")
+        traceback.print_exc()
         raise Exception(f"Failed to download to memory: {str(e)}")
 
 class YouTubeSource(discord.FFmpegOpusAudio):
