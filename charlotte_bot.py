@@ -173,7 +173,7 @@ async def play(ctx, *, url=None):
                         return await ctx.send("⚠️ 다시 시도해주세요!")
                         
                 except Exception as e:
-                    return await ctx.send(f"⚠️ URL 처리 오류: {str(e)}")
+                    return await ctx.send(f"⚠️ 오류: {str(e)}")
 
         # 큐에 추가
         client.audio_scheduler.enqueue_list(players)
