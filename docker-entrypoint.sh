@@ -1,19 +1,5 @@
 #!/bin/bash
 
-# 필요한 의존성 설치
-pip install pycryptodome spotipy spotipy-anon tqdm fastapi uvicorn[standard]
-
-# deezspot 디렉토리가 있는지 확인
-if [ -d "/deezspot" ]; then
-  echo "Installing deezspot from /deezspot directory..."
-  # deezspot 디렉토리가 존재하면 개발 모드로 설치
-  cd /deezspot
-  pip install -e .
-  cd /app
-else
-  echo "ERROR: /deezspot directory not found!"
-fi
-
 # Spotify API 환경변수 확인
 if [ -z "$SPOTIFY_CLIENT_ID" ] || [ -z "$SPOTIFY_CLIENT_SECRET" ]; then
   echo "WARNING: Spotify API credentials not found in environment variables!"
