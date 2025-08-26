@@ -6,6 +6,7 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 import traceback
+import re
 
 import discord
 import matplotlib.pyplot as plt
@@ -22,15 +23,21 @@ from Modules.LanguageResearcher import detect_text_type
 from Modules.ServerClient import ServerClient
 from Modules.TrackFactory import TrackFactory
 
-# 차단 목록 초기화
-raw_ids = os.getenv('BLOCKED_USER_IDS', '').strip()
-BLOCKED_USER_IDS = []
-if raw_ids:
-    try:
-        BLOCKED_USER_IDS = [int(x.strip()) for x in raw_ids.split(',') if x.strip()]
-    except ValueError as e:
-        print(f"⚠️ 초기화 실패 - 잘못된 사용자 ID 형식: {e}")
-        BLOCKED_USER_IDS = []
+SINGLE_EMOJI_REGEX = re.compile(
+    r"""
+    ^               # Start of string
+    (?!<.*<)        # Negative lookahead to ensure there is not more than one '<' at the beginning
+    <               # Emoji opening delimiter
+    (a)?            # Optional 'a' for animated emoji
+    :               # Colon delimiter
+    (.+?)           # Emoji name
+    :               # Colon delimiter
+    ([0-9]{15,21})  # Emoji ID
+    >               # Emoji closing delimiter
+    $               # End of string
+    """,
+    re.VERBOSE,
+)
 
 # -----------------------------------------
 
@@ -58,27 +65,27 @@ async def on_guild_join(guild):
         clients[guild.id] = ServerClient(guild.id)
         print(f"서버 클라이언트 추가: {guild.id}")
 
-
 @bot.event
-async def on_message(message):
-    # # 만약 차단된 사용자가 봇 명령어를 입력하면 무시
-    # if message.author.id in BLOCKED_USER_IDS and message.content.startswith(bot.command_prefix):
-    #     print(f"차단된 사용자 : {message.author.id}")
-    #     return
-    await bot.process_commands(message)
+async def on_message(message: discord.Message):
+    if not message.guild or message.author.bot:
+        return
 
-    # [일시 중지] Korean Fixer
-    # 문자열의 시작이 명령어 접두사가 아닐경우에만, 봇 또는 자기 자신이 입력한 메시지가 아닌 경우에만 실행
-    # if not message.content.startswith(bot.command_prefix) and message.author != bot.user and not message.author.bot:
-    #     eng_distribution = english_ratio_excluding_code_and_urls(message.content)
-    #     if eng_distribution < 0.7:
-    #         return
+    if (m := SINGLE_EMOJI_REGEX.match(message.content)):
+        embed = discord.Embed(
+            color = message.author.color if message.author.color != discord.Colour.default() else discord.Colour.greyple()
+        )
+        embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar)
+        emoji_id = m.group(3)
+        extension = ".gif" if m.group(1) else ".png"
+        embed.set_image(url=f"https://cdn.discordapp.com/emojis/{emoji_id}{extension}")
 
-    #     korean_scale = detect_text_type(message.content)["korean_scale"]
-    #     if korean_scale > 0.9:
-    #         resolved_message = convert_mixed_string(message.content)
-    #         await message.channel.send(resolved_message)
-
+        try:
+            await message.delete()
+            await message.channel.send(embed=embed, reference=message.reference, mention_author=False)
+        except discord.Forbidden:
+            pass
+        except Exception as e:
+            logging.exception(e)
 
 @bot.event
 async def close(self):
