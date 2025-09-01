@@ -87,6 +87,8 @@ async def on_message(message: discord.Message):
         except Exception as e:
             logging.exception(e)
 
+    await bot.process_commands(message)
+
 @bot.event
 async def close(self):
     # 파일 감시 종료
