@@ -14,8 +14,6 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# 로컬 deezspot 디렉토리는 볼륨으로 마운트할 예정
-
 COPY requirements.txt /app/
 RUN pip install --cache-dir /root/.cache/pip --upgrade pip \
  && pip install --cache-dir /root/.cache/pip -r requirements.txt \
@@ -28,7 +26,3 @@ COPY . .
 
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
-
-# COPY entrypoint.sh /entrypoint.sh
-# RUN chmod +x /entrypoint.sh
-# ENTRYPOINT ["/entrypoint.sh"]

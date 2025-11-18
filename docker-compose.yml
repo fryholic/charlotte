@@ -4,11 +4,7 @@ services:
     container_name: charlotte-bot
     restart: unless-stopped
     shm_size: '2gb'
-    command: charlotte_bot.py
-    entrypoint: ["/app/docker-entrypoint.sh"]
-    #volumes:
-      #- ./:/app
-      #- ./.env:/app/.env
+    command: python charlotte_bot.py
     volumes:
       - type: bind
         source: /home/mizore/charlotte/
