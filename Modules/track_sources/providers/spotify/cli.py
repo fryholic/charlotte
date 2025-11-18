@@ -10,8 +10,12 @@ import io
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TDRC, TRCK, TSRC, COMM
 
-from Modules.getMetadata import get_filtered_data, parse_uri, SpotifyInvalidUrlException
-from Modules.getToken import get_session_token
+from Modules.track_sources.providers.spotify.getMetadata import (
+    SpotifyInvalidUrlException,
+    get_filtered_data,
+    parse_uri,
+)
+from Modules.track_sources.providers.spotify.getToken import get_session_token
 
 @dataclass
 class Track:
