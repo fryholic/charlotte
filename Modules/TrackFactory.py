@@ -72,6 +72,15 @@ FFMPEG_OPTIONS_MEMORYAUDIOSOURCE = {
 
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 
+soundcloud_format_options = dict(ytdl_format_options)
+soundcloud_format_options.update({
+    'noplaylist': False,  # Allow playlist extraction for SoundCloud sets
+    'extract_flat': False,  # Need full entries to access the streamable URL
+    'default_search': 'scsearch1'
+})
+
+soundcloud_ytdl = youtube_dl.YoutubeDL(soundcloud_format_options)
+
 # -----------------------------------------
 # Spotify 다운로드 유틸리티
 # -----------------------------------------
@@ -224,6 +233,57 @@ class YouTubeSource(discord.FFmpegOpusAudio):
             print(f"YouTube Error: {e}")
             return []
 
+class SoundCloudSource(discord.FFmpegOpusAudio):
+    def __init__(self, source, *, data):
+        super().__init__(source, **FFMPEG_OPTIONS)
+        self.data = data
+        self.title = data.get('title', 'Unknown Title')
+        self.url = data.get('url')
+        self.artist = data.get('uploader') or data.get('creator')
+
+    @staticmethod
+    def _hydrate_entries(data):
+        entries = []
+        if not data:
+            return entries
+
+        raw_entries = data['entries'] if 'entries' in data else [data]
+        for entry in raw_entries:
+            if not entry:
+                continue
+            if 'url' not in entry and entry.get('webpage_url'):
+                try:
+                    entry = soundcloud_ytdl.extract_info(entry['webpage_url'], download=False)
+                except Exception as nested_err:
+                    logging.error(f"SoundCloud entry hydration failed: {nested_err}")
+                    continue
+            if entry.get('url'):
+                entries.append(entry)
+        return entries
+
+    @classmethod
+    async def from_url(cls, query, *, loop=None):
+        """SoundCloud URL 또는 검색어로부터 소스 생성"""
+        loop = loop or asyncio.get_event_loop()
+
+        def extract():
+            info_query = query.strip()
+            lower_query = info_query.lower()
+            if not info_query.startswith('http'):
+                if lower_query.startswith('scsearch:'):
+                    info_query = info_query
+                else:
+                    info_query = f"scsearch1:{info_query}"
+            data = soundcloud_ytdl.extract_info(info_query, download=False)
+            return cls._hydrate_entries(data)
+
+        try:
+            entries = await loop.run_in_executor(None, extract)
+            return [cls(entry['url'], data=entry) for entry in entries]
+        except Exception as e:
+            logging.error(f"SoundCloud Error: {e}")
+            return []
+
 class MemoryAudioSource(discord.FFmpegOpusAudio):
     def __init__(self, buffer, metadata, *, bitrate=320):
         self.buffer = buffer
@@ -326,13 +386,33 @@ class TrackFactory:
     async def identify_source(query):
         """쿼리 타입을 식별하고 적절한 소스 생성"""
         try:
+            lower_query = query.lower()
             # YouTube URL 확인
-            if 'youtube.com/' in query or 'youtu.be/' in query:
+            if 'youtube.com/' in lower_query or 'youtu.be/' in lower_query:
                 print(f"YouTube URL detected: {query}")
                 return await YouTubeSource.from_url(query)
+
+            # SoundCloud URL 확인
+            if (
+                'soundcloud.com/' in lower_query
+                or 'snd.sc/' in lower_query
+                or lower_query.startswith('soundcloud:')
+                or lower_query.startswith('soundcloud ')
+                or lower_query.startswith('scsearch:')
+            ):
+                print(f"SoundCloud query detected: {query}")
+                normalized_query = query
+                if lower_query.startswith('soundcloud:'):
+                    normalized_query = query.split(':', 1)[1].strip() or query
+                elif lower_query.startswith('soundcloud '):
+                    normalized_query = query.split(' ', 1)[1].strip() or query
+                sources = await SoundCloudSource.from_url(normalized_query)
+                if sources:
+                    return sources
+                raise Exception("SoundCloud 트랙을 찾을 수 없습니다")
                 
             # Spotify URL 확인
-            if 'spotify.com/' in query or 'open.spotify.com/' in query:
+            if 'spotify.com/' in lower_query or 'open.spotify.com/' in lower_query:
                 print(f"Spotify URL detected: {query}")
                 try:
                     url_info = parse_uri(query)
