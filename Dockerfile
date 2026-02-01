@@ -1,31 +1,32 @@
-FROM python:3.11.11-slim
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
-    ffmpeg
-
-RUN apt-get update && apt-get install -y \
+    ffmpeg \
     wget \
     gnupg \
     unzip \
     libglib2.0-0 \
     libnss3 \
     libgconf-2-4 \
-    libfontconfig1
+    libfontconfig1 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt /app/
-RUN pip install --cache-dir /root/.cache/pip --upgrade pip \
- && pip install --cache-dir /root/.cache/pip -r requirements.txt \
- && pip install --cache-dir /root/.cache/pip pycryptodome spotipy spotipy-anon tqdm fastapi uvicorn[standard]
+# Install dependencies using uv and lockfile
+COPY pyproject.toml uv.lock ./
 
-# librespot-python 설치 (사용 가능할 경우)
-RUN pip install --cache-dir /root/.cache/pip librespot-python || echo "librespot-python not available, continuing..."
+# Install into a location outside /app to avoid volume mount shadowing
+ENV UV_PROJECT_ENVIRONMENT="/venv"
+RUN uv sync --frozen --no-install-project
 
 COPY . .
 
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+# Enable the virtual environment
+ENV PATH="/venv/bin:"
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 RUN chmod +x docker-entrypoint.sh
 

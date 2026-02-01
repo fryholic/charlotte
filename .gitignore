@@ -11,3 +11,4 @@ credentials.json
 *.backup
 
 .cache
+.venv/
