@@ -8,7 +8,6 @@ from Modules.track_sources import TrackQuery, UploadPayload, sort_providers
 from Modules.track_sources.base import BaseTrackSource, BaseUploadSource
 from Modules.track_sources.providers import (
     SoundCloudSource,
-    SpotifySource,
     YouTubeSearchFallback,
     YouTubeUrlSource,
 )
@@ -23,7 +22,7 @@ class TrackFactory:
     """High level façade that delegates to registered providers only."""
 
     _URL_PROVIDERS: Sequence[Type[BaseTrackSource]] = sort_providers(
-        [SpotifySource, SoundCloudSource, YouTubeUrlSource, YouTubeSearchFallback]
+        [SoundCloudSource, YouTubeUrlSource, YouTubeSearchFallback]
     )
     _UPLOAD_PROVIDER: Type[BaseUploadSource] = UploadSource
 
