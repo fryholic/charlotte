@@ -25,7 +25,7 @@ RUN uv sync --frozen --no-install-project
 COPY . .
 
 # Enable the virtual environment
-ENV PATH="/venv/bin:"
+ENV PATH="/venv/bin:$PATH"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
