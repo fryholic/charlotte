@@ -21,6 +21,7 @@ from Modules.features.konglish.KonglishResolver import (
 from Modules.features.language_research.LanguageResearcher import detect_text_type
 from Modules.ServerClient import ServerClient
 from Modules.TrackFactory import TrackFactory
+from Modules.ErrorHandler import handle_error
 
 # -----------------------------------------
 # 봇 및 클라이언트 관리
@@ -141,7 +142,7 @@ async def play(ctx, *, url=None):
                     if not players or not isinstance(players, list):
                         return await ctx.send("⚠️ 파일 처리에 실패했습니다.")
                 except Exception as e:
-                    return await ctx.send(f"⚠️ 파일 처리 오류: {str(e)}")
+                    return await handle_error(ctx, e, "파일 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.")
         else:
             if not url:
                 return await ctx.send("URL을 입력하거나 오디오 파일을 업로드해주세요!")
@@ -158,7 +159,7 @@ async def play(ctx, *, url=None):
                         return await ctx.send("⚠️ 다시 시도해주세요!")
                         
                 except Exception as e:
-                    return await ctx.send(f"⚠️ 오류: {str(e)}")
+                    return await handle_error(ctx, e, "음악을 불러오는 중 오류가 발생했습니다. 링크가 올바른지 확인해주세요.")
 
         # 큐에 추가
         client.audio_scheduler.enqueue_list(players)
@@ -170,8 +171,7 @@ async def play(ctx, *, url=None):
             await play_next(ctx.guild)
 
     except Exception as e:
-        print(f"Unexpected error: {traceback.format_exc()}")
-        await ctx.send(f"⚠️ 오류 발생: {str(e)}")
+        await handle_error(ctx, e, "알 수 없는 오류가 발생했습니다. 관리자에게 문의해주세요.")
 
 @bot.command(name='skip')
 async def skip(ctx):

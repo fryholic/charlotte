@@ -19,7 +19,7 @@ YTDL_FORMAT_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
     "extract_flat": "in_playlist",
-    "impersonate": "chrome",
+    # "impersonate": "chrome", # Removed due to yt-dlp AssertionError (expects ImpersonateTarget object)
     "concurrent_fragment_downloads": 5,
 }
 
