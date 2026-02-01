@@ -1,18 +1,10 @@
 """Centralised configuration for media download/transcode options."""
 
-YTDL_FORMAT_OPTIONS = {
-    "format": "bestaudio/best",
+COMMON_DOWNLOAD_OPTIONS = {
     "restrictfilenames": True,
-    "noplaylist": True,
-    "nocheckcertificate": True,
     "ignoreerrors": False,
     "quiet": False,
     "no_warnings": False,
-    "extract_flat": "in_playlist",
-    "http_headers": {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
     "postprocessors": [
         {
             "key": "FFmpegExtractAudio",
@@ -22,8 +14,18 @@ YTDL_FORMAT_OPTIONS = {
     ],
 }
 
+YTDL_FORMAT_OPTIONS = {
+    **COMMON_DOWNLOAD_OPTIONS,
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "extract_flat": "in_playlist",
+    "impersonate": "chrome",
+    "concurrent_fragment_downloads": 5,
+}
+
 SOUNDCLOUD_FORMAT_OPTIONS = {
-    **YTDL_FORMAT_OPTIONS,
+    **COMMON_DOWNLOAD_OPTIONS,
+    "format": "bestaudio/best",
     "noplaylist": False,
     "extract_flat": False,
     "default_search": "scsearch1",

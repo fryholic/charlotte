@@ -84,6 +84,7 @@ wheel==0.44.0
 wrapt==1.17.2
 wsproto==1.2.0
 yarl==1.18.0
-yt-dlp==2025.11.12
+yt-dlp==2026.1.31
+curl-cffi>=0.5.10
 zendriver==0.5.1
 deezspot-spotizerr>=2.4.0
