@@ -25,7 +25,7 @@ dependencies = [
     "cryptography==44.0.0",
     "cycler==0.12.1",
     "Deprecated==1.2.18",
-    "discord.py==2.5.0",
+    "discord-py[voice]>=2.7.0",
     "dotenv==0.9.9",
     "ffmpeg==1.4",
     "Flask==3.0.3",
@@ -92,5 +92,5 @@ dependencies = [
     "curl-cffi>=0.5.10",
     "zendriver==0.5.1",
     "fastapi",
-    "uvicorn[standard]"
+    "uvicorn[standard]",
 ]
