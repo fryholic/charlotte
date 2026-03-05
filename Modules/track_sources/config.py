@@ -32,8 +32,8 @@ SOUNDCLOUD_FORMAT_OPTIONS = {
 }
 
 FFMPEG_STREAM_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn -b:a 320k -ac 2 -ar 48000",
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -thread_queue_size 4096",
+    "options": "-vn -b:a 320k -ac 2 -ar 48000 -bufsize 128k",
 }
 
 FFMPEG_MEMORY_OPTIONS = {
