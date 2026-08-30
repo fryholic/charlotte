@@ -10,6 +10,11 @@ import discord
 from discord.ext import commands
 
 from charlotte.config import AppConfig
+from charlotte.constants import (
+    SHUTDOWN_AUXILIARY_TIMEOUT,
+    SHUTDOWN_DISCORD_TIMEOUT,
+    SHUTDOWN_PLAYERS_TIMEOUT,
+)
 from charlotte.extensions.manager import ExtensionManager
 from charlotte.health import HealthWriter
 from charlotte.messages import render
@@ -187,14 +192,19 @@ class CharlotteBot(commands.Bot):
         self._closing = True
         self.log.info("Charlotte stopping", extra={"event": "app.stopping"})
         cleanup_steps = (
-            ("health", self.health_writer.stop),
-            ("owner-resolution", self._stop_owner_resolution),
-            ("players", self.players.close),
-            ("discord", super().close),
+            ("health", SHUTDOWN_AUXILIARY_TIMEOUT, self.health_writer.stop),
+            (
+                "owner-resolution",
+                SHUTDOWN_AUXILIARY_TIMEOUT,
+                self._stop_owner_resolution,
+            ),
+            ("players", SHUTDOWN_PLAYERS_TIMEOUT, self.players.close),
+            ("discord", SHUTDOWN_DISCORD_TIMEOUT, super().close),
         )
-        for component, cleanup in cleanup_steps:
+        for component, timeout, cleanup in cleanup_steps:
             try:
-                await cleanup()
+                async with asyncio.timeout(timeout):
+                    await cleanup()
             except Exception as error:
                 log_exception(
                     self.log,

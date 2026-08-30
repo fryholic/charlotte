@@ -13,11 +13,18 @@ import discord
 from charlotte.config import AppConfig
 from charlotte.constants import (
     PROVIDER_OPERATION_TIMEOUT,
+    SHUTDOWN_DETACHED_CLEANUP_TIMEOUT,
+    SHUTDOWN_VOICE_TIMEOUT,
     VOICE_OPERATION_TIMEOUT,
     VOICE_RECONNECT_ATTEMPTS,
     VOICE_RECONNECT_WINDOW,
 )
-from charlotte.errors import AccessDeniedError, PlaybackError, QueueLimitError
+from charlotte.errors import (
+    AccessDeniedError,
+    PlaybackError,
+    QueueLimitError,
+    ResourceCleanupError,
+)
 from charlotte.messages import render, truncate
 from charlotte.music.models import (
     AddResult,
@@ -32,6 +39,13 @@ from charlotte.music.models import (
 )
 from charlotte.music.provider import ProviderRegistry, observe_detached_work
 from charlotte.observability import ErrorContext, ErrorReporter, log_exception
+
+type _CleanupBundle = tuple[
+    Track | None,
+    PreparedAudio | None,
+    list[Track],
+    PreparedAudio | None,
+]
 
 
 class GuildPlayer:
@@ -221,6 +235,7 @@ class GuildPlayer:
             self._assert_access_locked(access_check)
             if self._closed:
                 raise PlaybackError("Player is closed")
+            self.providers.ensure_available(track.provider)
             self._enforce_limits(track)
             if self.current is None and not self.queue:
                 self.current = track
@@ -286,7 +301,7 @@ class GuildPlayer:
                 if voice is not None and (voice.is_playing() or voice.is_paused()):
                     voice.stop()
         if prepared is not None:
-            self._safe_cleanup_prepared(prepared, "music.skip.cleanup_failed")
+            await self._safe_cleanup_prepared(prepared, "music.skip.cleanup_failed")
         self._safe_dispose_track(track, "music.skip.dispose_failed")
         self.log.info(
             "Track skipped",
@@ -360,7 +375,10 @@ class GuildPlayer:
         return result
 
     async def leave(
-        self, *, access_check: Callable[[discord.abc.Connectable | None], bool] | None = None
+        self,
+        *,
+        access_check: Callable[[discord.abc.Connectable | None], bool] | None = None,
+        _voice_timeout: float = VOICE_OPERATION_TIMEOUT,
     ) -> tuple[str | None, StopResult]:
         async with self._connection_lock:
             channel = self.bot_channel
@@ -370,7 +388,7 @@ class GuildPlayer:
                 assert result is not None
             voice = self._active_voice_client()
             if voice is not None:
-                async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
+                async with asyncio.timeout(_voice_timeout):
                     await voice.disconnect(force=True)
             self.voice_client = None
         self.log.info(
@@ -382,6 +400,7 @@ class GuildPlayer:
     async def leave_if_empty(self, expected_channel: discord.abc.Connectable) -> bool:
         """Disconnect only if the same connected channel is still empty of humans."""
 
+        deferred_cleanup: list[_CleanupBundle] = []
         async with self._connection_lock:
             voice = self._active_voice_client()
             channel = getattr(voice, "channel", None)
@@ -402,16 +421,21 @@ class GuildPlayer:
                             not getattr(member, "bot", False)
                             for member in getattr(expected_channel, "members", ())
                         )
-                    )
+                    ),
+                    deferred_cleanup=deferred_cleanup,
                 )
                 if result is None:
                     return False
             voice = self._active_voice_client()
             if voice is None or getattr(voice, "channel", None) is not expected_channel:
                 return False
-            async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
-                await voice.disconnect(force=True)
-            self.voice_client = None
+            try:
+                async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
+                    await voice.disconnect(force=True)
+                self.voice_client = None
+            finally:
+                for cleanup_bundle in deferred_cleanup:
+                    await self._cleanup_detached(*cleanup_bundle)
         self.log.info(
             "Voice disconnected from empty channel",
             extra={
@@ -451,7 +475,7 @@ class GuildPlayer:
                 return
             self._closed = True
         try:
-            await self.leave()
+            await self.leave(_voice_timeout=SHUTDOWN_VOICE_TIMEOUT)
         except Exception as exc:
             log_exception(
                 self.log,
@@ -506,7 +530,7 @@ class GuildPlayer:
                 self._generation += 1
                 generation = self._generation
             if previous is not None:
-                self._safe_cleanup_prepared(previous, "music.recovery.cleanup_failed")
+                await self._safe_cleanup_prepared(previous, "music.recovery.cleanup_failed")
 
             loop = asyncio.get_running_loop()
             deadline = loop.time() + VOICE_RECONNECT_WINDOW
@@ -587,6 +611,9 @@ class GuildPlayer:
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if task.cancelled() and (caller is None or caller.cancelling() == 0):
+                return False
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
             raise
@@ -603,20 +630,30 @@ class GuildPlayer:
         start_at: float = 0,
     ) -> bool:
         last_error: BaseException | None = None
-        for _ in range(attempts):
+        for attempt in range(attempts):
             prepared: PreparedAudio | None = None
             try:
                 prepared = await self._prepare_audio(track, start_at=start_at)
                 if await self._play_prepared(track, generation, prepared, start_at=start_at):
                     return True
+                await self._safe_cleanup_prepared(prepared, "music.prepare.stale_cleanup_failed")
+                return False
             except asyncio.CancelledError:
                 if prepared is not None:
-                    self._safe_cleanup_prepared(prepared, "music.prepare.cancel_cleanup_failed")
+                    await self._safe_cleanup_prepared(
+                        prepared, "music.prepare.cancel_cleanup_failed"
+                    )
                 raise
+            except ResourceCleanupError as exc:
+                last_error = exc
+                break
             except Exception as exc:
                 last_error = exc
             if prepared is not None:
-                self._safe_cleanup_prepared(prepared, "music.prepare.cleanup_failed")
+                await self._safe_cleanup_prepared(prepared, "music.prepare.cleanup_failed")
+            if attempt + 1 >= attempts or track.failure_retries >= 1:
+                break
+            track.failure_retries += 1
         if last_error is None:
             return False
         await self._fail_current(track, generation, last_error)
@@ -670,6 +707,7 @@ class GuildPlayer:
         self._spawn(self._on_finished(track_id, generation, error))
 
     async def _on_finished(self, track_id: str, generation: int, error: Exception | None) -> None:
+        retry_generation: int | None = None
         async with self.lock:
             if (
                 self.current is None
@@ -679,12 +717,28 @@ class GuildPlayer:
                 return
             track = self.current
             prepared = self.current_prepared
-            self.current = None
             self.current_prepared = None
             self._paused = False
             self._generation += 1
+            if error is not None and track.failure_retries < 1 and not self._closed:
+                track.failure_retries += 1
+                track.state = TrackState.PREPARING
+                retry_generation = self._generation
+            else:
+                self.current = None
         if prepared is not None:
-            self._safe_cleanup_prepared(prepared, "music.finished.cleanup_failed")
+            await self._safe_cleanup_prepared(prepared, "music.finished.cleanup_failed")
+        if retry_generation is not None:
+            self.log.warning(
+                "Playback failed; retrying the same track once",
+                extra={
+                    "event": "music.playback.retrying",
+                    "track_id": track.id,
+                    "exception_type": type(error).__name__,
+                },
+            )
+            await self._prepare_current(track, retry_generation, attempts=1)
+            return
         self._safe_dispose_track(track, "music.finished.dispose_failed")
         if error is not None:
             await self._notify(
@@ -726,7 +780,7 @@ class GuildPlayer:
                 self.prepared_next_track_id = None
                 self._prefetch_task = None
         if stale_prepared is not None:
-            self._safe_cleanup_prepared(stale_prepared, "music.prefetch.stale_cleanup_failed")
+            await self._safe_cleanup_prepared(stale_prepared, "music.prefetch.stale_cleanup_failed")
         if prefetch_task is not None:
             await asyncio.gather(prefetch_task, return_exceptions=True)
             async with self.lock:
@@ -742,8 +796,7 @@ class GuildPlayer:
                 if await self._play_prepared(track, generation, prepared):
                     return
             except Exception as exc:
-                self._safe_cleanup_prepared(prepared, "music.prefetch.play_cleanup_failed")
-                await self._prepare_current(track, generation, attempts=1)
+                await self._safe_cleanup_prepared(prepared, "music.prefetch.play_cleanup_failed")
                 self.log.warning(
                     "prefetched source play failed",
                     extra={
@@ -751,8 +804,13 @@ class GuildPlayer:
                         "exception_type": type(exc).__name__,
                     },
                 )
+                if track.failure_retries < 1:
+                    track.failure_retries += 1
+                    await self._prepare_current(track, generation, attempts=1)
+                else:
+                    await self._fail_current(track, generation, exc)
                 return
-            self._safe_cleanup_prepared(prepared, "music.prefetch.rejected_cleanup_failed")
+            await self._safe_cleanup_prepared(prepared, "music.prefetch.rejected_cleanup_failed")
         await self._prepare_current(track, generation, attempts=2)
 
     def _ensure_prefetch_locked(self) -> None:
@@ -774,7 +832,7 @@ class GuildPlayer:
             prepared = await self._prepare_audio(track)
         except asyncio.CancelledError:
             if prepared is not None:
-                self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
+                await self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
             raise
         except Exception as exc:
             async with self.lock:
@@ -799,16 +857,27 @@ class GuildPlayer:
                 if self.prepared_next_track_id == track.id:
                     self.prepared_next_track_id = None
         except asyncio.CancelledError:
-            self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
+            await self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
             raise
-        self._safe_cleanup_prepared(prepared, "music.prefetch.invalid_cleanup_failed")
+        await self._safe_cleanup_prepared(prepared, "music.prefetch.invalid_cleanup_failed")
 
     async def _stop_locked(
-        self, *, still_valid: Callable[[], bool] | None = None
+        self,
+        *,
+        still_valid: Callable[[], bool] | None = None,
+        deferred_cleanup: list[_CleanupBundle] | None = None,
     ) -> StopResult | None:
-        await self._cancel_current_prepare_locked()
+        if still_valid is not None and not still_valid():
+            return None
+        cancelled_current_prepare = await self._cancel_current_prepare_locked()
         await self._cancel_prefetch_locked()
         if still_valid is not None and not still_valid():
+            if (
+                cancelled_current_prepare
+                and self.current is not None
+                and self.current.state is TrackState.PREPARING
+            ):
+                self._spawn(self._prepare_current(self.current, self._generation, attempts=2))
             self._ensure_prefetch_locked()
             return None
         current = self.current
@@ -826,18 +895,25 @@ class GuildPlayer:
         voice = self._active_voice_client()
         if voice is not None and (voice.is_playing() or voice.is_paused()):
             voice.stop()
-        self._cleanup_detached(current, prepared, queued, next_prepared)
+        cleanup_bundle = (current, prepared, queued, next_prepared)
+        if deferred_cleanup is None:
+            await self._cleanup_detached(*cleanup_bundle)
+        else:
+            deferred_cleanup.append(cleanup_bundle)
         return StopResult((1 if current is not None else 0) + len(queued))
 
-    async def _cancel_current_prepare_locked(self) -> None:
+    async def _cancel_current_prepare_locked(self) -> bool:
         task = self._current_prepare_task
         if task is None or task is asyncio.current_task():
-            return
+            return False
+        cancelled = False
         if not task.done():
+            cancelled = True
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
         if self._current_prepare_task is task:
             self._current_prepare_task = None
+        return cancelled
 
     async def _cancel_prefetch_locked(self, *, track_id: str | None = None) -> None:
         if track_id is not None and self.prepared_next_track_id != track_id:
@@ -851,30 +927,43 @@ class GuildPlayer:
         self.prepared_next_track_id = None
         self._prefetch_task = None
         if prepared is not None:
-            self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
+            await self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
 
     async def _prepare_audio(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
         async with asyncio.timeout(PROVIDER_OPERATION_TIMEOUT):
-            while self._detached_source_cleanup:
-                pending = asyncio.gather(
-                    *tuple(self._detached_source_cleanup), return_exceptions=True
-                )
-                await asyncio.shield(pending)
+            await self._await_detached_source_cleanup()
             with observe_detached_work(self._track_detached_source_cleanup):
                 return await self.providers.prepare(track, start_at=start_at)
 
     def _track_detached_source_cleanup(self, completion: asyncio.Future[None]) -> None:
         self._detached_source_cleanup.add(completion)
-        completion.add_done_callback(self._detached_source_cleanup.discard)
+
+    async def _await_detached_source_cleanup(self) -> None:
+        while self._detached_source_cleanup:
+            batch = tuple(self._detached_source_cleanup)
+            pending = asyncio.gather(*batch, return_exceptions=True)
+            results = await asyncio.shield(pending)
+            self._detached_source_cleanup.difference_update(batch)
+            error = next((result for result in results if isinstance(result, BaseException)), None)
+            if error is not None:
+                raise ResourceCleanupError("Detached source cleanup failed") from error
 
     async def _drain_detached_source_cleanup(self) -> None:
         try:
-            async with asyncio.timeout(PROVIDER_OPERATION_TIMEOUT):
+            async with asyncio.timeout(SHUTDOWN_DETACHED_CLEANUP_TIMEOUT):
                 while self._detached_source_cleanup:
-                    pending = asyncio.gather(
-                        *tuple(self._detached_source_cleanup), return_exceptions=True
-                    )
-                    await asyncio.shield(pending)
+                    batch = tuple(self._detached_source_cleanup)
+                    pending = asyncio.gather(*batch, return_exceptions=True)
+                    results = await asyncio.shield(pending)
+                    self._detached_source_cleanup.difference_update(batch)
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            log_exception(
+                                self.log,
+                                result,
+                                event="music.shutdown.detached_cleanup_failed",
+                                context={"guild_id": self.guild_id},
+                            )
         except TimeoutError as exc:
             log_exception(
                 self.log,
@@ -900,7 +989,7 @@ class GuildPlayer:
             self._paused = False
             self._generation += 1
         if prepared is not None:
-            self._safe_cleanup_prepared(prepared, "music.failure.cleanup_failed")
+            await self._safe_cleanup_prepared(prepared, "music.failure.cleanup_failed")
         self._safe_dispose_track(track, "music.failure.dispose_failed")
         await self._notify(
             track.request_channel_id,
@@ -919,7 +1008,7 @@ class GuildPlayer:
             self._paused = False
             self._generation += 1
         if prepared is not None:
-            self._safe_cleanup_prepared(prepared, "music.cancel.cleanup_failed")
+            await self._safe_cleanup_prepared(prepared, "music.cancel.cleanup_failed")
         self._safe_dispose_track(track, "music.cancel.dispose_failed")
 
     def _enforce_limits(self, incoming: Track) -> None:
@@ -948,7 +1037,7 @@ class GuildPlayer:
         now = self._pause_started_at or asyncio.get_running_loop().time()
         return max(0.0, now - self._started_at - self._paused_total)
 
-    def _cleanup_detached(
+    async def _cleanup_detached(
         self,
         current: Track | None,
         prepared: PreparedAudio | None,
@@ -956,17 +1045,24 @@ class GuildPlayer:
         next_prepared: PreparedAudio | None,
     ) -> None:
         if prepared is not None:
-            self._safe_cleanup_prepared(prepared, "music.stop.cleanup_failed")
+            await self._safe_cleanup_prepared(prepared, "music.stop.cleanup_failed")
         if next_prepared is not None:
-            self._safe_cleanup_prepared(next_prepared, "music.stop.cleanup_failed")
+            await self._safe_cleanup_prepared(next_prepared, "music.stop.cleanup_failed")
         if current is not None:
             self._safe_dispose_track(current, "music.stop.dispose_failed")
         for track in queued:
             self._safe_dispose_track(track, "music.stop.dispose_failed")
 
-    def _safe_cleanup_prepared(self, prepared: PreparedAudio, event: str) -> None:
+    async def _safe_cleanup_prepared(self, prepared: PreparedAudio, event: str) -> None:
+        cleanup = asyncio.create_task(asyncio.to_thread(prepared.cleanup))
         try:
-            prepared.cleanup()
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            result = await asyncio.gather(cleanup, return_exceptions=True)
+            error = result[0]
+            if isinstance(error, BaseException):
+                log_exception(self.log, error, event=event)
+            raise
         except BaseException as exc:
             log_exception(self.log, exc, event=event)
 

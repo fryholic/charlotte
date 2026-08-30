@@ -3,6 +3,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from charlotte.app import create_bot, required_intents
+from charlotte.constants import (
+    SHUTDOWN_AUXILIARY_TIMEOUT,
+    SHUTDOWN_DETACHED_CLEANUP_TIMEOUT,
+    SHUTDOWN_DISCORD_TIMEOUT,
+    SHUTDOWN_PLAYERS_TIMEOUT,
+    SHUTDOWN_VOICE_TIMEOUT,
+)
 
 
 def test_bot_requests_only_required_intents() -> None:
@@ -44,3 +51,8 @@ async def test_ready_retries_transient_owner_lookup_failure(app_config) -> None:
     assert bot._owner_resolved
     assert bot.reporter.resolve_owner.await_count == 2
     await bot.close()
+
+
+def test_internal_shutdown_budgets_fit_docker_grace_period() -> None:
+    assert SHUTDOWN_AUXILIARY_TIMEOUT * 2 + SHUTDOWN_PLAYERS_TIMEOUT + SHUTDOWN_DISCORD_TIMEOUT < 30
+    assert SHUTDOWN_VOICE_TIMEOUT + SHUTDOWN_DETACHED_CLEANUP_TIMEOUT <= (SHUTDOWN_PLAYERS_TIMEOUT)

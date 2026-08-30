@@ -46,6 +46,10 @@ class PlaybackError(CharlotteError):
     pass
 
 
+class ResourceCleanupError(PlaybackError):
+    """A detached or prepared audio resource could not be reclaimed safely."""
+
+
 class QueueLimitError(UserError):
     message_id = "common.operation_cancelled"
 

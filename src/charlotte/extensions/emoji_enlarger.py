@@ -75,8 +75,18 @@ class EmojiEnlargerCog(commands.Cog):
             return
         if not await self._claim(message.id):
             return
-        embed = build_embed(message, emoji)
-        context = _error_context(message, emoji)
+        context = _fallback_error_context(message, emoji)
+        try:
+            context = _error_context(message, emoji)
+            embed = build_embed(message, emoji)
+        except Exception as exc:
+            await self._notice(message.channel, render("emoji.replace_failed"), context)
+            await self.bot.reporter.report(
+                exc,
+                event="emoji.prepare_failed",
+                context=context,
+            )
+            return
         try:
             await message.delete()
         except discord.NotFound:
@@ -179,6 +189,30 @@ def _error_context(message: discord.Message, emoji: ParsedEmoji) -> ErrorContext
         message_id=message.id,
         emoji_id=emoji.emoji_id,
     )
+
+
+def _fallback_error_context(message: discord.Message, emoji: ParsedEmoji) -> ErrorContext:
+    guild = _safe_attribute(message, "guild")
+    channel = _safe_attribute(message, "channel")
+    author = _safe_attribute(message, "author")
+    content = _safe_attribute(message, "content")
+    return ErrorContext(
+        guild_name=_safe_attribute(guild, "name"),
+        guild_id=_safe_attribute(guild, "id"),
+        channel_name=_safe_attribute(channel, "name"),
+        channel_id=_safe_attribute(channel, "id"),
+        message_content=content[:500] if isinstance(content, str) else None,
+        author_name=_safe_attribute(author, "display_name"),
+        message_id=_safe_attribute(message, "id"),
+        emoji_id=emoji.emoji_id,
+    )
+
+
+def _safe_attribute(value: object, name: str) -> object | None:
+    try:
+        return getattr(value, name, None)
+    except Exception:
+        return None
 
 
 async def setup(bot) -> None:

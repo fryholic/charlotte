@@ -28,7 +28,7 @@ _SECRET_MAPPING = re.compile(
     r"(?i)(['\"]?(?:token|cookie|authorization|password|secret|signature|sig|key|session_id|verify_key)['\"]?\s*:\s*['\"])([^'\"]+)"
 )
 _SECRET_HEADER = re.compile(r"(?i)\b(authorization|cookie|set-cookie)\s*:\s*([^\r\n,}]+)")
-_URL = re.compile(r"https?://[^\s<>'\",\]\)]+")
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>'\",\]\)]+")
 _SENSITIVE_QUERY_KEYS = {
     "auth",
     "authorization",
@@ -89,7 +89,10 @@ def redact_url(value: str) -> str:
     netloc = f"{hostname}{port}"
     path = parsed.path
     lowered_hostname = hostname.lower()
-    if lowered_hostname == "soundcloud.com" or lowered_hostname.endswith(".soundcloud.com"):
+    if lowered_hostname == "discord.com" and path.startswith("/api/webhooks/"):
+        path = "/api/webhooks/[redacted]"
+        safe_query = [(key, "[redacted]") for key, _ in safe_query]
+    elif lowered_hostname == "soundcloud.com" or lowered_hostname.endswith(".soundcloud.com"):
         path = "/".join(
             "[redacted-secret]" if segment.startswith("s-") else segment
             for segment in path.split("/")
@@ -132,7 +135,18 @@ def redact(value: object, *, secrets: tuple[str, ...] = ()) -> object:
 def _is_sensitive_mapping_key(key: object) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
     return normalized in _SENSITIVE_MAPPING_KEYS or normalized.endswith(
-        ("_authorization", "_cookie", "_password", "_secret", "_signature", "_token")
+        (
+            "_authorization",
+            "_cookie",
+            "_key",
+            "_password",
+            "_secret",
+            "_session_id",
+            "_sig",
+            "_signature",
+            "_token",
+            "_verify_key",
+        )
     )
 
 

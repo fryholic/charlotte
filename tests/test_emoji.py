@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import discord
 import pytest
 
+from charlotte.extensions import emoji_enlarger as emoji_module
 from charlotte.extensions.emoji_enlarger import EmojiEnlargerCog, parse_custom_emoji
 
 
@@ -182,3 +183,21 @@ async def test_duplicate_event_is_claimed_only_once(app_config) -> None:
     await cog.on_message(message)
     await cog.on_message(message)
     assert len(channel.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_embed_build_failure_keeps_original_and_reports(monkeypatch, app_config) -> None:
+    cog, reporter = build_cog(app_config)
+    channel = Channel()
+    message = Message(channel)
+
+    def fail_build(message, emoji):
+        raise RuntimeError("avatar lookup failed")
+
+    monkeypatch.setattr(emoji_module, "build_embed", fail_build)
+    await cog.on_message(message)
+
+    assert not message.deleted
+    assert channel.sent[0][0]
+    assert reporter.reports[0][1] == "emoji.prepare_failed"
+    assert reporter.reports[0][2].message_id == message.id

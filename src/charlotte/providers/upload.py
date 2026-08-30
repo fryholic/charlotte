@@ -22,6 +22,16 @@ class _InvalidAudio(ValueError):
     pass
 
 
+class _MemoryFFmpegOpusAudio(discord.FFmpegOpusAudio):
+    """Silence the benign pipe-close race that discord.py leaves outside its try block."""
+
+    def _pipe_writer(self, source: io.BufferedIOBase) -> None:
+        try:
+            super()._pipe_writer(source)
+        except BrokenPipeError, OSError, ValueError:
+            return
+
+
 class _PipeBufferOwner:
     def __init__(self, buffer: io.BytesIO, source: discord.FFmpegOpusAudio) -> None:
         self._buffer = buffer
@@ -104,7 +114,7 @@ class UploadProvider:
                 options = f"-ss {start_at:.3f} {options}"
             stderr_sink = open(os.devnull, "wb")
             try:
-                source = discord.FFmpegOpusAudio(
+                source = _MemoryFFmpegOpusAudio(
                     playback_buffer,
                     pipe=True,
                     before_options="-nostdin",
@@ -118,11 +128,11 @@ class UploadProvider:
 
         def cleanup_cancelled(result: tuple[discord.FFmpegOpusAudio, Any]) -> None:
             source, stderr_sink = result
-            try:
-                source.cleanup()
-                _PipeBufferOwner(playback_buffer, source).close()
-            finally:
-                stderr_sink.close()
+            PreparedAudio(
+                source=source,
+                seekable=True,
+                owned_resources=(_PipeBufferOwner(playback_buffer, source), stderr_sink),
+            ).cleanup()
 
         try:
             source, stderr_sink = await run_blocking(

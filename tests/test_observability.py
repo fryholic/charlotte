@@ -51,6 +51,29 @@ def test_redacts_sensitive_mapping_values_and_nested_formatter_fields() -> None:
         assert secret not in payload
 
 
+def test_redacts_sensitive_mapping_suffixes_from_structured_logs() -> None:
+    secrets = {
+        "api_key": "api-secret",
+        "request_sig": "signature-secret",
+        "gateway_session_id": "session-secret",
+        "ed25519_verify_key": "verification-secret",
+    }
+    record = logging.LogRecord("charlotte.test", logging.ERROR, __file__, 1, "failed", (), None)
+    record.context = secrets
+    payload = JsonFormatter().format(record)
+    for secret in secrets.values():
+        assert secret not in payload
+
+
+def test_redacts_url_userinfo_and_discord_webhook_tokens() -> None:
+    value = redact(
+        "ftp://user:password@example.net/private/file "
+        "https://discord.com/api/webhooks/123456789/webhook-token"
+    )
+    for secret in ("user", "password", "private/file", "123456789", "webhook-token"):
+        assert secret not in value
+
+
 def test_redacts_direct_media_url_path_and_query() -> None:
     value = redact_url("https://media.example.net/private/path?expire=1&n=challenge")
     assert "private/path" not in value

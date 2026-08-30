@@ -39,6 +39,7 @@ class Track:
     owned_resource: io.BytesIO | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     state: TrackState = TrackState.QUEUED
+    failure_retries: int = 0
 
     @property
     def upload_size(self) -> int:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import threading
 import wave
 
 import pytest
@@ -26,13 +27,13 @@ class FailingAttachment(Attachment):
         raise RuntimeError("network failed")
 
 
-def wav_bytes() -> bytes:
+def wav_bytes(*, frames: int = 800, rate: int = 8000) -> bytes:
     output = io.BytesIO()
     with wave.open(output, "wb") as audio:
         audio.setnchannels(1)
         audio.setsampwidth(2)
-        audio.setframerate(8000)
-        audio.writeframes(b"\x00\x00" * 800)
+        audio.setframerate(rate)
+        audio.writeframes(b"\x00\x00" * frames)
     return output.getvalue()
 
 
@@ -96,3 +97,29 @@ async def test_valid_upload_builds_and_cleans_a_pipe_ffmpeg_source() -> None:
     track.dispose()
     assert playback_buffer.closed
     assert track.owned_resource is not None and track.owned_resource.closed
+
+
+@pytest.mark.asyncio
+async def test_immediate_upload_cleanup_has_no_pipe_writer_exception(monkeypatch) -> None:
+    thread_errors: list[BaseException] = []
+    monkeypatch.setattr(
+        threading,
+        "excepthook",
+        lambda args: thread_errors.append(args.exc_value),
+    )
+    provider = UploadProvider()
+    track = await provider.inspect_upload(
+        RequestContext(1, 2, 3, "requester"),
+        Attachment(wav_bytes(frames=48000, rate=48000)),
+    )
+
+    prepared = await provider.prepare(track)
+    source = prepared.source
+    playback_buffer = prepared.owned_resources[0]
+    prepared.cleanup()
+    track.dispose()
+
+    writer = getattr(source, "_pipe_writer_thread", None)
+    assert writer is None or not writer.is_alive()
+    assert playback_buffer.closed
+    assert thread_errors == []

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import signal
 import sys
@@ -15,8 +16,10 @@ import discord
 from charlotte.constants import YTDLP_SOCKET_TIMEOUT
 from charlotte.music.models import PreparedAudio
 from charlotte.music.provider import register_detached_work
+from charlotte.observability import log_exception
 
 _DETACHED_CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+_LOG = logging.getLogger("charlotte.providers")
 
 
 async def run_blocking[T](
@@ -40,12 +43,23 @@ async def run_blocking[T](
 
             def finished(finished_task: asyncio.Task[None]) -> None:
                 _DETACHED_CLEANUP_TASKS.discard(finished_task)
-                if not completion.done():
+                try:
+                    error = finished_task.exception()
+                except asyncio.CancelledError as exc:
+                    error = exc
+                if error is not None:
+                    log_exception(_LOG, error, event="provider.detached_cleanup_failed")
+                if completion.done():
+                    return
+                if error is None:
                     completion.set_result(None)
+                else:
+                    completion.set_exception(error)
 
             cleanup_task.add_done_callback(finished)
 
         task.add_done_callback(cleanup)
+        completion.add_done_callback(_consume_completion_exception)
         register_detached_work(completion)
         raise
 
@@ -53,16 +67,15 @@ async def run_blocking[T](
 async def _cleanup_detached_result[T](
     task: asyncio.Task[T], cleanup_cancelled_result: Callable[[T], None] | None
 ) -> None:
-    try:
-        result = task.result()
-    except BaseException:
-        return
+    result = task.result()
     if cleanup_cancelled_result is None:
         return
-    try:
-        await asyncio.to_thread(cleanup_cancelled_result, result)
-    except BaseException:
-        return
+    await asyncio.to_thread(cleanup_cancelled_result, result)
+
+
+def _consume_completion_exception(completion: asyncio.Future[None]) -> None:
+    if not completion.cancelled():
+        completion.exception()
 
 
 class YtdlpError(RuntimeError):
@@ -76,6 +89,7 @@ async def extract(url: str, *, playlist: bool) -> dict[str, Any]:
         sys.executable,
         "-m",
         "yt_dlp",
+        "--ignore-config",
         "--dump-single-json",
         "--no-warnings",
         "--no-cache-dir",

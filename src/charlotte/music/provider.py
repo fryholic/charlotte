@@ -94,6 +94,12 @@ class ProviderRegistry:
     def inflight(self, name: str) -> int:
         return self._inflight[name]
 
+    def ensure_available(self, name: str) -> None:
+        """Reject a pending inspected Track once its provider starts unloading."""
+
+        if name in self._unloading or name not in self._providers:
+            raise ProviderError(f"Provider is unloading or unavailable: {name}")
+
     def provider_for_url(self, parsed_url: ParseResult) -> TrackProvider:
         matches = [
             provider
@@ -130,11 +136,8 @@ class ProviderRegistry:
         return await self._call(provider.name, lambda: provider.inspect_upload(request, attachment))
 
     async def prepare(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
-        provider = self._providers.get(track.provider)
-        if track.provider in self._unloading:
-            raise ProviderError(f"Provider is unloading: {track.provider}")
-        if provider is None:
-            raise ProviderError(f"Provider is not loaded: {track.provider}")
+        self.ensure_available(track.provider)
+        provider = self._providers[track.provider]
         return await self._call(provider.name, lambda: provider.prepare(track, start_at=start_at))
 
     async def _call(self, name: str, operation: Callable[[], Awaitable[Any]]) -> Any:

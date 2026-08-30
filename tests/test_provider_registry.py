@@ -177,3 +177,29 @@ async def test_detached_cleanup_does_not_block_the_event_loop() -> None:
     assert completions and not completions[0].done()
     release_cleanup.set()
     await asyncio.wait_for(completions[0], 1)
+
+
+@pytest.mark.asyncio
+async def test_detached_cleanup_failure_is_exposed_to_its_owner() -> None:
+    constructor_started = threading.Event()
+    release_constructor = threading.Event()
+    completions = []
+
+    def construct():
+        constructor_started.set()
+        release_constructor.wait(timeout=2)
+        return object()
+
+    def cleanup(result):
+        raise RuntimeError("cleanup failed")
+
+    with observe_detached_work(completions.append):
+        operation = asyncio.create_task(run_blocking(construct, cleanup_cancelled_result=cleanup))
+        assert await asyncio.to_thread(constructor_started.wait, 1)
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+
+    release_constructor.set()
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await asyncio.wait_for(completions[0], 1)

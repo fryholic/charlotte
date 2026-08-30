@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from charlotte.errors import AccessDeniedError
+from charlotte.errors import AccessDeniedError, ProviderError
 from charlotte.music.models import PreparedAudio
 from charlotte.music.player import GuildPlayer
 from charlotte.music.provider import ProviderRegistry
@@ -129,6 +129,55 @@ class DetachedCurrentProvider(GatedPrefetchProvider):
         else:
             source = self._source()
         return PreparedAudio(source=source, seekable=True)
+
+
+class FailingDetachedCleanupProvider(GatedPrefetchProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.current_started = threading.Event()
+        self.release_current = threading.Event()
+
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+
+        def create():
+            self.current_started.set()
+            self.release_current.wait(timeout=2)
+            return self._source()
+
+        def fail_cleanup(source):
+            source.cleanup()
+            raise RuntimeError("detached cleanup failed")
+
+        source = await run_blocking(create, cleanup_cancelled_result=fail_cleanup)
+        return PreparedAudio(source=source, seekable=True)
+
+
+class BlockingCleanupSource(TrackingSource):
+    def __init__(self, provider) -> None:
+        super().__init__(provider)
+        self.cleanup_started = threading.Event()
+        self.release_cleanup = threading.Event()
+
+    def cleanup(self) -> None:
+        self.cleanup_started.set()
+        self.release_cleanup.wait(timeout=2)
+        super().cleanup()
+
+
+class BlockingCleanupProvider(GatedPrefetchProvider):
+    def _source(self):
+        source = BlockingCleanupSource(self)
+        self.sources.append(source)
+        self.live_sources += 1
+        self.max_live_sources = max(self.max_live_sources, self.live_sources)
+        return source
+
+
+class TrackingProvider(GatedPrefetchProvider):
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+        return PreparedAudio(source=self._source(), seekable=True)
 
 
 class DelayedReconnectChannel(FakeVoiceChannel):
@@ -374,8 +423,7 @@ async def test_stop_waits_for_owned_current_prepare_before_new_sources(app_confi
 
     provider.release_cancel.set()
     await asyncio.wait_for(stopping, 1)
-    with pytest.raises(asyncio.CancelledError):
-        await first_add
+    assert not (await first_add).started
     await asyncio.wait_for(second_add, 1)
     await player.add(make_track("third"))
     await asyncio.sleep(0.02)
@@ -396,8 +444,7 @@ async def test_new_prepare_waits_for_detached_constructor_cleanup(app_config) ->
     first_add = asyncio.create_task(player.add(make_track("first")))
     assert await asyncio.to_thread(provider.current_started.wait, 1)
     await asyncio.wait_for(player.stop(), 1)
-    with pytest.raises(asyncio.CancelledError):
-        await first_add
+    assert not (await first_add).started
 
     second_add = asyncio.create_task(player.add(make_track("second")))
     await asyncio.sleep(0.02)
@@ -428,8 +475,7 @@ async def test_detached_constructor_does_not_block_another_guild(app_config) -> 
     first_add = asyncio.create_task(first_player.add(make_track("first")))
     assert await asyncio.to_thread(provider.current_started.wait, 1)
     await asyncio.wait_for(first_player.stop(), 1)
-    with pytest.raises(asyncio.CancelledError):
-        await first_add
+    assert not (await first_add).started
 
     await asyncio.wait_for(second_player.add(make_track("independent")), 1)
     assert second_player.current is not None
@@ -465,8 +511,7 @@ async def test_recovery_cancels_initial_prepare_without_third_source(app_config)
     provider.release_current.set()
 
     await asyncio.wait_for(recovery, 1)
-    with pytest.raises(asyncio.CancelledError):
-        await first_add
+    assert not (await first_add).started
     assert player.current is first
     assert provider.max_live_sources <= 2
     assert provider.sources[1].cleaned
@@ -556,8 +601,7 @@ async def test_close_drains_detached_constructor_cleanup(app_config) -> None:
     provider.release_current.set()
 
     await asyncio.wait_for(closing, 1)
-    with pytest.raises(asyncio.CancelledError):
-        await first_add
+    assert not (await first_add).started
     assert provider.live_sources == 0
     assert provider.sources[0].cleaned
 
@@ -647,4 +691,144 @@ async def test_control_rechecks_access_at_mutation_boundary(app_config, transiti
         await asyncio.wait_for(operation, 1)
     assert player.current is not None and player.current.title == "current"
     assert player.bot_channel is channel
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_track_is_rejected_after_its_provider_begins_unloading(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    track = make_track("inspected-before-unload")
+    player.providers.begin_unload("fake")
+
+    with pytest.raises(ProviderError, match="unloading or unavailable"):
+        await player.add(track)
+
+    assert player.current is None
+    assert not player.queue
+    track.dispose()
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_human_join_during_current_prepare_restores_cancelled_playback(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = SlowCancelCurrentProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    track = make_track("current")
+    adding = asyncio.create_task(player.add(track))
+    await asyncio.wait_for(provider.current_created.wait(), 1)
+    leaving = asyncio.create_task(player.leave_if_empty(channel))
+    await asyncio.wait_for(provider.cancel_started.wait(), 1)
+    channel.members.append(SimpleNamespace(bot=False))
+    provider.release_cancel.set()
+
+    assert not await asyncio.wait_for(leaving, 1)
+    assert not (await asyncio.wait_for(adding, 1)).started
+    for _ in range(100):
+        if player.current_prepared is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert player.current is track
+    assert player.current_prepared is not None
+    assert player.bot_channel is channel
+    assert provider.sources[0].cleaned
+    assert provider.max_live_sources <= 2
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_playback_callback_error_retries_same_track_only_once(app_config) -> None:
+    player, channel, _, reporter = build_player(app_config)
+    provider = TrackingProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    current = make_track("current")
+    following = make_track("following")
+    await player.add(current)
+    await player.add(following)
+    await asyncio.sleep(0.02)
+    voice = channel.guild.voice_client
+    voice.finish(RuntimeError("decoder failed once"))
+
+    for _ in range(100):
+        if player.current is current and current.failure_retries == 1 and voice.is_playing():
+            break
+        await asyncio.sleep(0.01)
+    assert player.current is current
+    assert current.failure_retries == 1
+    assert voice.is_playing()
+    assert provider.sources[0].cleaned
+    assert reporter.reports == []
+    assert provider.max_live_sources <= 2
+
+    voice.finish(RuntimeError("decoder failed twice"))
+    for _ in range(100):
+        if player.current is following and voice.is_playing():
+            break
+        await asyncio.sleep(0.01)
+    assert player.current is following
+    assert current.state.value == "disposed"
+    assert any(event == "music.playback.failed" for _, event, _, _ in reporter.reports)
+    assert provider.max_live_sources <= 2
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_prepared_cleanup_never_blocks_other_event_loop_work(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = BlockingCleanupProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    source = provider.sources[0]
+
+    stopping = asyncio.create_task(player.stop())
+    assert await asyncio.to_thread(source.cleanup_started.wait, 1)
+    ticked = asyncio.Event()
+    asyncio.get_running_loop().call_soon(ticked.set)
+    await asyncio.wait_for(ticked.wait(), 0.1)
+    assert not stopping.done()
+
+    source.release_cleanup.set()
+    await asyncio.wait_for(stopping, 1)
+    assert source.cleaned
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_detached_cleanup_prevents_another_source(app_config) -> None:
+    player, channel, _, reporter = build_player(app_config)
+    provider = FailingDetachedCleanupProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    first_add = asyncio.create_task(player.add(make_track("first")))
+    assert await asyncio.to_thread(provider.current_started.wait, 1)
+    await asyncio.wait_for(player.stop(), 1)
+    assert not (await first_add).started
+
+    second = make_track("second")
+    second_add = asyncio.create_task(player.add(second))
+    await asyncio.sleep(0.02)
+    assert not second_add.done()
+    provider.release_current.set()
+
+    result = await asyncio.wait_for(second_add, 1)
+    assert not result.started
+    assert provider.prepare_calls == 1
+    assert player.current is None
+    assert second.state.value == "disposed"
+    assert any(event == "music.prepare.failed" for _, event, _, _ in reporter.reports)
     await player.close()

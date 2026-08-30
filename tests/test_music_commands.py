@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
 from types import SimpleNamespace
 
 import pytest
 
 from charlotte.extensions.music_commands import MusicCommandsCog
-from charlotte.music.models import AddResult, PlayCommitResult, RequestContext, Track
-from tests.fakes import FakeReporter
+from charlotte.music.models import AddResult, PlayCommitResult, PreparedAudio, RequestContext, Track
+from charlotte.music.player import GuildPlayer
+from charlotte.music.provider import ProviderRegistry
+from tests.fakes import (
+    FakeBot,
+    FakeGuild,
+    FakeReporter,
+    FakeSource,
+    FakeTextChannel,
+    FakeVoiceChannel,
+)
 
 
 class Typing:
@@ -28,6 +39,53 @@ class VoiceChannel:
 
     def permissions_for(self, member):
         return SimpleNamespace(connect=True, speak=True)
+
+
+class PermittedFakeVoiceChannel(FakeVoiceChannel):
+    def permissions_for(self, member):
+        return SimpleNamespace(connect=True, speak=True)
+
+
+class RecoveryOwnedProvider:
+    name = "fake"
+    supports_upload = False
+
+    def __init__(self) -> None:
+        self.prepare_calls = 0
+        self.first_started = asyncio.Event()
+        self.first_cancelled = asyncio.Event()
+        self.release_cancel = asyncio.Event()
+        self.track: Track | None = None
+
+    def supports_url(self, parsed_url) -> bool:
+        return parsed_url.hostname == "example.com"
+
+    async def inspect_url(self, request, parsed_url, raw_url):
+        self.track = Track(
+            provider=self.name,
+            title="owned upload-like track",
+            requester_id=request.requester_id,
+            requester_display_name=request.requester_display_name,
+            request_channel_id=request.text_channel_id,
+            canonical_url=raw_url,
+            owned_resource=io.BytesIO(b"owned"),
+        )
+        return self.track
+
+    async def inspect_upload(self, request, attachment):
+        raise NotImplementedError
+
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+        if self.prepare_calls == 1:
+            self.first_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.first_cancelled.set()
+                await asyncio.shield(self.release_cancel.wait())
+                raise
+        return PreparedAudio(source=FakeSource(), seekable=True)
 
 
 class Context:
@@ -137,6 +195,62 @@ async def test_play_rechecks_voice_state_before_committing_remote_admin_move() -
     assert player.added is not None
     assert player.finished and not player.cancelled
     assert "채널 이동 후 재생" in ctx.sent[0][0]
+
+
+@pytest.mark.asyncio
+async def test_play_transfers_track_ownership_when_recovery_cancels_prepare(app_config) -> None:
+    discord_bot = FakeBot()
+    guild = FakeGuild(1)
+    target = PermittedFakeVoiceChannel(guild, 600, "music")
+    discord_bot.guilds[guild.id] = guild
+    discord_bot.channels[500] = FakeTextChannel(500)
+    provider = RecoveryOwnedProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    reporter = FakeReporter()
+    player = GuildPlayer(
+        guild.id,
+        bot=discord_bot,
+        config=app_config,
+        providers=providers,
+        reporter=reporter,
+    )
+    bot = SimpleNamespace(
+        players=Players(player),
+        providers=providers,
+        reporter=reporter,
+        config=app_config,
+        log=logging.getLogger("test.music_commands.recovery"),
+    )
+    author = SimpleNamespace(
+        id=10,
+        display_name="requester",
+        voice=SimpleNamespace(channel=target),
+        guild_permissions=SimpleNamespace(administrator=False),
+    )
+    ctx = Context(author=author)
+
+    command = asyncio.create_task(
+        MusicCommandsCog.play.callback(MusicCommandsCog(bot), ctx, url="https://example.com/track")
+    )
+    await asyncio.wait_for(provider.first_started.wait(), 1)
+    disconnected = player.voice_client
+    assert disconnected is not None
+    disconnected.connected = False
+    guild.voice_client = None
+    recovery = asyncio.create_task(
+        player.recover_voice(target, expected_track_id=provider.track.id)
+    )
+    await asyncio.wait_for(provider.first_cancelled.wait(), 1)
+    provider.release_cancel.set()
+
+    await asyncio.wait_for(asyncio.gather(command, recovery), 1)
+    assert provider.track is player.current
+    assert provider.track.owned_resource is not None
+    assert not provider.track.owned_resource.closed
+    assert provider.prepare_calls == 2
+    await player.close()
+    assert provider.track.owned_resource.closed
 
 
 @pytest.mark.asyncio
