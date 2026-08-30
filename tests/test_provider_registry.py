@@ -111,3 +111,29 @@ async def test_provider_timeout_releases_command_and_capacity_before_thread_stop
     registry.begin_unload("fake")
     registry.cancel_unload("fake")
     release.set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_source_constructor_returns_before_late_cleanup() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    cleaned = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def construct():
+        started.set()
+        release.wait(timeout=2)
+        return object()
+
+    def cleanup(result):
+        loop.call_soon_threadsafe(cleaned.set)
+
+    operation = asyncio.create_task(run_blocking(construct, cleanup_cancelled_result=cleanup))
+    await asyncio.to_thread(started.wait, 1)
+    started_at = time.monotonic()
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    assert time.monotonic() - started_at < 0.1
+    release.set()
+    await asyncio.wait_for(cleaned.wait(), 1)

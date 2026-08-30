@@ -12,11 +12,12 @@ import discord
 
 from charlotte.config import AppConfig
 from charlotte.constants import (
+    PROVIDER_OPERATION_TIMEOUT,
     VOICE_OPERATION_TIMEOUT,
     VOICE_RECONNECT_ATTEMPTS,
     VOICE_RECONNECT_WINDOW,
 )
-from charlotte.errors import PlaybackError, QueueLimitError
+from charlotte.errors import AccessDeniedError, PlaybackError, QueueLimitError
 from charlotte.messages import render
 from charlotte.music.models import (
     AddResult,
@@ -28,7 +29,7 @@ from charlotte.music.models import (
     Track,
     TrackState,
 )
-from charlotte.music.provider import ProviderRegistry
+from charlotte.music.provider import ProviderRegistry, observe_detached_work
 from charlotte.observability import ErrorContext, ErrorReporter, log_exception
 
 
@@ -66,6 +67,8 @@ class GuildPlayer:
         self._pause_started_at: float | None = None
         self._paused_total = 0.0
         self._prefetch_task: asyncio.Task[None] | None = None
+        self._current_prepare_task: asyncio.Task[bool] | None = None
+        self._detached_source_cleanup: set[asyncio.Future[None]] = set()
         self._tasks: set[asyncio.Task[Any]] = set()
         self._report_tasks: set[asyncio.Task[Any]] = set()
         self.log = logging.getLogger(f"charlotte.player.{guild_id}")
@@ -181,7 +184,7 @@ class GuildPlayer:
         )
         if start_track:
             try:
-                started = await self._prepare_and_play(track, generation, attempts=2)
+                started = await self._prepare_current(track, generation, attempts=2)
             except asyncio.CancelledError:
                 await self._discard_current_preserve_queue(track, generation)
                 raise
@@ -190,20 +193,25 @@ class GuildPlayer:
             self._spawn(self._advance())
         return AddResult(started=False, queued_position=position)
 
-    async def skip(self) -> SkipResult:
-        async with self.lock:
-            track = self.current
-            if track is None:
-                return SkipResult(None, None)
-            prepared = self.current_prepared
-            self.current = None
-            self.current_prepared = None
-            self._paused = False
-            self._generation += 1
-            voice = self._active_voice_client()
-            next_title = self.queue[0].title if self.queue else None
-            if voice is not None and (voice.is_playing() or voice.is_paused()):
-                voice.stop()
+    async def skip(
+        self, *, access_check: Callable[[discord.abc.Connectable | None], bool] | None = None
+    ) -> SkipResult:
+        async with self._connection_lock:
+            async with self.lock:
+                self._assert_access_locked(access_check)
+                track = self.current
+                if track is None:
+                    return SkipResult(None, None)
+                await self._cancel_current_prepare_locked()
+                prepared = self.current_prepared
+                self.current = None
+                self.current_prepared = None
+                self._paused = False
+                self._generation += 1
+                voice = self._active_voice_client()
+                next_title = self.queue[0].title if self.queue else None
+                if voice is not None and (voice.is_playing() or voice.is_paused()):
+                    voice.stop()
         if prepared is not None:
             self._safe_cleanup_prepared(prepared, "music.skip.cleanup_failed")
         self._safe_dispose_track(track, "music.skip.dispose_failed")
@@ -214,49 +222,61 @@ class GuildPlayer:
         await self._advance()
         return SkipResult(track.title, next_title)
 
-    async def pause(self) -> Track | None:
-        async with self.lock:
-            if self.current is None:
-                return None
-            if self._paused:
+    async def pause(
+        self, *, access_check: Callable[[discord.abc.Connectable | None], bool] | None = None
+    ) -> Track | None:
+        async with self._connection_lock:
+            async with self.lock:
+                self._assert_access_locked(access_check)
+                if self.current is None:
+                    return None
+                if self._paused:
+                    return self.current
+                voice = self._active_voice_client()
+                if voice is None or not voice.is_playing():
+                    return None
+                voice.pause()
+                self._paused = True
+                self._pause_started_at = asyncio.get_running_loop().time()
+                self.log.info(
+                    "Track paused",
+                    extra={"event": "track.paused", "track_id": self.current.id},
+                )
                 return self.current
-            voice = self._active_voice_client()
-            if voice is None or not voice.is_playing():
-                return None
-            voice.pause()
-            self._paused = True
-            self._pause_started_at = asyncio.get_running_loop().time()
-            self.log.info(
-                "Track paused",
-                extra={"event": "track.paused", "track_id": self.current.id},
-            )
-            return self.current
 
-    async def resume(self) -> Track | None:
-        async with self.lock:
-            if self.current is None or not self._paused:
-                return None
-            voice = self._active_voice_client()
-            if voice is None or not voice.is_paused():
-                self._paused = False
+    async def resume(
+        self, *, access_check: Callable[[discord.abc.Connectable | None], bool] | None = None
+    ) -> Track | None:
+        async with self._connection_lock:
+            async with self.lock:
+                self._assert_access_locked(access_check)
+                if self.current is None or not self._paused:
+                    return None
+                voice = self._active_voice_client()
+                if voice is None or not voice.is_paused():
+                    self._paused = False
+                    self._pause_started_at = None
+                    return None
+                voice.resume()
+                now = asyncio.get_running_loop().time()
+                if self._pause_started_at is not None:
+                    self._paused_total += now - self._pause_started_at
                 self._pause_started_at = None
-                return None
-            voice.resume()
-            now = asyncio.get_running_loop().time()
-            if self._pause_started_at is not None:
-                self._paused_total += now - self._pause_started_at
-            self._pause_started_at = None
-            self._paused = False
-            self.log.info(
-                "Track resumed",
-                extra={"event": "track.resumed", "track_id": self.current.id},
-            )
-            return self.current
+                self._paused = False
+                self.log.info(
+                    "Track resumed",
+                    extra={"event": "track.resumed", "track_id": self.current.id},
+                )
+                return self.current
 
-    async def stop(self) -> StopResult:
-        async with self.lock:
-            result = await self._stop_locked()
-            assert result is not None
+    async def stop(
+        self, *, access_check: Callable[[discord.abc.Connectable | None], bool] | None = None
+    ) -> StopResult:
+        async with self._connection_lock:
+            async with self.lock:
+                self._assert_access_locked(access_check)
+                result = await self._stop_locked()
+                assert result is not None
         self.log.info(
             "Queue cleared",
             extra={
@@ -266,10 +286,15 @@ class GuildPlayer:
         )
         return result
 
-    async def leave(self) -> tuple[str | None, StopResult]:
+    async def leave(
+        self, *, access_check: Callable[[discord.abc.Connectable | None], bool] | None = None
+    ) -> tuple[str | None, StopResult]:
         async with self._connection_lock:
             channel = self.bot_channel
-            result = await self.stop()
+            async with self.lock:
+                self._assert_access_locked(access_check)
+                result = await self._stop_locked()
+                assert result is not None
             voice = self._active_voice_client()
             if voice is not None:
                 async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
@@ -383,56 +408,108 @@ class GuildPlayer:
             if report_tasks:
                 await asyncio.gather(*report_tasks, return_exceptions=True)
 
-    async def recover_voice(self, channel: discord.abc.Connectable) -> None:
-        async with self.lock:
-            track = self.current
-            if track is None or self._closed:
-                return
-            previous = self.current_prepared
-            seekable = previous.seekable if previous is not None else False
-            offset = self._playback_offset_locked()
-            self.current_prepared = None
-            self.voice_client = None
-            self._generation += 1
-            generation = self._generation
-        if previous is not None:
-            self._safe_cleanup_prepared(previous, "music.recovery.cleanup_failed")
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + VOICE_RECONNECT_WINDOW
+    async def recover_voice(
+        self, channel: discord.abc.Connectable, *, expected_track_id: str
+    ) -> None:
         last_error: BaseException | None = None
-        for _ in range(VOICE_RECONNECT_ATTEMPTS):
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                break
-            try:
-                async with asyncio.timeout(remaining):
-                    self.voice_client = await channel.connect(
-                        timeout=min(5.0, remaining), reconnect=False
-                    )
-                break
-            except Exception as exc:
-                last_error = exc
-        else:
-            self.voice_client = None
+        notification: str | None = None
+        report_error = False
+        async with self._connection_lock:
+            if self._active_voice_client() is not None:
+                return
+            async with self.lock:
+                track = self.current
+                if track is None or track.id != expected_track_id or self._closed:
+                    return
+                previous = self.current_prepared
+                seekable = previous.seekable if previous is not None else False
+                offset = self._playback_offset_locked()
+                self.current_prepared = None
+                self.voice_client = None
+                self._generation += 1
+                generation = self._generation
+            if previous is not None:
+                self._safe_cleanup_prepared(previous, "music.recovery.cleanup_failed")
 
-        if self._active_voice_client() is None:
-            await self._discard_current_preserve_queue(track, generation)
-            await self._notify(track.request_channel_id, render("music.voice.reconnect_failed"))
-            if last_error is not None:
-                await self._report(last_error, "music.voice.reconnect_failed", track)
-            return
-        if not seekable:
-            await self._discard_current_preserve_queue(track, generation)
-            await self._notify(
-                track.request_channel_id,
-                render("music.voice.reconnect_unseekable", title=track.title),
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + VOICE_RECONNECT_WINDOW
+            candidate: discord.VoiceClient | None = None
+            for _ in range(VOICE_RECONNECT_ATTEMPTS):
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    async with asyncio.timeout(remaining):
+                        candidate = await channel.connect(
+                            timeout=min(5.0, remaining), reconnect=False
+                        )
+                    break
+                except Exception as exc:
+                    last_error = exc
+
+            async with self.lock:
+                valid = (
+                    self.current is track and self._generation == generation and not self._closed
+                )
+            if not valid:
+                if candidate is not None:
+                    try:
+                        async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
+                            await candidate.disconnect(force=True)
+                    except Exception as exc:
+                        log_exception(self.log, exc, event="music.recovery.stale_disconnect_failed")
+                return
+            self.voice_client = candidate
+
+            if self._active_voice_client() is None:
+                await self._discard_current_preserve_queue(track, generation)
+                notification = render("music.voice.reconnect_failed")
+                report_error = last_error is not None
+            elif not seekable:
+                await self._discard_current_preserve_queue(track, generation)
+                notification = render("music.voice.reconnect_unseekable", title=track.title)
+                await self._advance()
+            else:
+                started = await self._prepare_current(
+                    track, generation, attempts=1, start_at=offset
+                )
+                if started:
+                    notification = render("music.voice.reconnected")
+
+        if notification is not None:
+            await self._notify(track.request_channel_id, notification)
+        if report_error and last_error is not None:
+            await self._report(last_error, "music.voice.reconnect_failed", track)
+
+    async def _prepare_current(
+        self,
+        track: Track,
+        generation: int,
+        *,
+        attempts: int,
+        start_at: float = 0,
+    ) -> bool:
+        async with self.lock:
+            if self.current is not track or self._generation != generation or self._closed:
+                return False
+            task = self._spawn(
+                self._prepare_and_play(
+                    track,
+                    generation,
+                    attempts=attempts,
+                    start_at=start_at,
+                )
             )
-            await self._advance()
-            return
-        started = await self._prepare_and_play(track, generation, attempts=1, start_at=offset)
-        if started:
-            await self._notify(track.request_channel_id, render("music.voice.reconnected"))
+            self._current_prepare_task = task
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        finally:
+            if self._current_prepare_task is task:
+                self._current_prepare_task = None
 
     async def _prepare_and_play(
         self,
@@ -446,7 +523,7 @@ class GuildPlayer:
         for _ in range(attempts):
             prepared: PreparedAudio | None = None
             try:
-                prepared = await self.providers.prepare(track, start_at=start_at)
+                prepared = await self._prepare_audio(track, start_at=start_at)
                 if await self._play_prepared(track, generation, prepared, start_at=start_at):
                     return True
             except asyncio.CancelledError:
@@ -579,7 +656,7 @@ class GuildPlayer:
                     return
             except Exception as exc:
                 self._safe_cleanup_prepared(prepared, "music.prefetch.play_cleanup_failed")
-                await self._prepare_and_play(track, generation, attempts=1)
+                await self._prepare_current(track, generation, attempts=1)
                 self.log.warning(
                     "prefetched source play failed",
                     extra={
@@ -589,7 +666,7 @@ class GuildPlayer:
                 )
                 return
             self._safe_cleanup_prepared(prepared, "music.prefetch.rejected_cleanup_failed")
-        await self._prepare_and_play(track, generation, attempts=2)
+        await self._prepare_current(track, generation, attempts=2)
 
     def _ensure_prefetch_locked(self) -> None:
         if (
@@ -607,7 +684,7 @@ class GuildPlayer:
     async def _prefetch(self, track: Track, generation: int) -> None:
         prepared: PreparedAudio | None = None
         try:
-            prepared = await self.providers.prepare(track)
+            prepared = await self._prepare_audio(track)
         except asyncio.CancelledError:
             if prepared is not None:
                 self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
@@ -642,6 +719,7 @@ class GuildPlayer:
     async def _stop_locked(
         self, *, still_valid: Callable[[], bool] | None = None
     ) -> StopResult | None:
+        await self._cancel_current_prepare_locked()
         prefetch_task = self._prefetch_task
         if prefetch_task is not None and not prefetch_task.done():
             prefetch_task.cancel()
@@ -672,6 +750,37 @@ class GuildPlayer:
             voice.stop()
         self._cleanup_detached(current, prepared, queued, next_prepared)
         return StopResult((1 if current is not None else 0) + len(queued))
+
+    async def _cancel_current_prepare_locked(self) -> None:
+        task = self._current_prepare_task
+        if task is None or task is asyncio.current_task():
+            return
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if self._current_prepare_task is task:
+            self._current_prepare_task = None
+
+    async def _prepare_audio(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
+        async with asyncio.timeout(PROVIDER_OPERATION_TIMEOUT):
+            while self._detached_source_cleanup:
+                pending = asyncio.gather(
+                    *tuple(self._detached_source_cleanup), return_exceptions=True
+                )
+                await asyncio.shield(pending)
+            with observe_detached_work(self._track_detached_source_cleanup):
+                return await self.providers.prepare(track, start_at=start_at)
+
+    def _track_detached_source_cleanup(self, completion: asyncio.Future[None]) -> None:
+        self._detached_source_cleanup.add(completion)
+        completion.add_done_callback(self._detached_source_cleanup.discard)
+
+    def _assert_access_locked(
+        self,
+        access_check: Callable[[discord.abc.Connectable | None], bool] | None,
+    ) -> None:
+        if access_check is not None and not access_check(self.bot_channel):
+            raise AccessDeniedError()
 
     async def _fail_current(self, track: Track, generation: int, error: BaseException) -> None:
         async with self.lock:

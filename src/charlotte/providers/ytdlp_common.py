@@ -14,33 +14,31 @@ import discord
 
 from charlotte.constants import YTDLP_SOCKET_TIMEOUT
 from charlotte.music.models import PreparedAudio
+from charlotte.music.provider import register_detached_work
 
 
 async def run_blocking[T](
     operation: Callable[[], T],
     *,
     cleanup_cancelled_result: Callable[[T], None] | None = None,
-    wait_for_cleanup_on_cancel: bool = False,
 ) -> T:
     """Run short blocking work without making cancellation wait for the worker."""
 
     task = asyncio.create_task(asyncio.to_thread(operation))
     try:
         return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        if wait_for_cleanup_on_cancel:
+    except asyncio.CancelledError:
+        completion = asyncio.get_running_loop().create_future()
+
+        def cleanup(completed: asyncio.Task[T]) -> None:
             try:
-                result = await task
-            except Exception:
-                raise cancellation from None
-            try:
-                if cleanup_cancelled_result is not None:
-                    cleanup_cancelled_result(result)
+                _cleanup_detached_result(completed, cleanup_cancelled_result)
             finally:
-                raise cancellation
-        task.add_done_callback(
-            lambda completed: _cleanup_detached_result(completed, cleanup_cancelled_result)
-        )
+                if not completion.done():
+                    completion.set_result(None)
+
+        task.add_done_callback(cleanup)
+        register_detached_work(completion)
         raise
 
 
@@ -164,6 +162,5 @@ async def stream_audio(url: str, *, start_at: float = 0) -> PreparedAudio:
     source, stderr_sink = await run_blocking(
         create,
         cleanup_cancelled_result=cleanup_cancelled,
-        wait_for_cleanup_on_cancel=True,
     )
     return PreparedAudio(source=source, seekable=True, owned_resources=(stderr_sink,))

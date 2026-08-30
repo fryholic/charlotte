@@ -5,12 +5,35 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, Protocol
 from urllib.parse import ParseResult
 
 from charlotte.constants import PROVIDER_MAX_CONCURRENCY, PROVIDER_OPERATION_TIMEOUT
 from charlotte.errors import ExtensionOperationError, ProviderError, UnsupportedSourceError
 from charlotte.music.models import PreparedAudio, RequestContext, Track
+
+_detached_work_observer: ContextVar[Callable[[asyncio.Future[None]], None] | None] = ContextVar(
+    "charlotte_detached_work_observer", default=None
+)
+
+
+@contextmanager
+def observe_detached_work(observer: Callable[[asyncio.Future[None]], None]):
+    """Associate detached blocking cleanup with the current guild preparation."""
+
+    token = _detached_work_observer.set(observer)
+    try:
+        yield
+    finally:
+        _detached_work_observer.reset(token)
+
+
+def register_detached_work(completion: asyncio.Future[None]) -> None:
+    observer = _detached_work_observer.get()
+    if observer is not None:
+        observer(completion)
 
 
 class TrackProvider(Protocol):

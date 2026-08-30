@@ -112,6 +112,15 @@ def _table(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:
     return value
 
 
+def _reject_unknown_keys(
+    data: Mapping[str, Any], allowed: frozenset[str], *, location: str
+) -> None:
+    unknown = sorted(str(key) for key in data if key not in allowed)
+    if unknown:
+        names = ", ".join(unknown)
+        raise ConfigError(f"Unknown {location} configuration key(s): {names}")
+
+
 def _string_set(value: Any, *, name: str) -> frozenset[str]:
     if value is None:
         return frozenset()
@@ -172,9 +181,25 @@ def load_config(environ: Mapping[str, str] | None = None) -> AppConfig:
     default_path = Path("config.dev.toml" if development else "config.toml")
     config_path = Path(configured_path) if configured_path else default_path
     data = _read_toml(config_path, explicitly_configured=configured_path is not None)
+    _reject_unknown_keys(data, frozenset({"bot", "extensions", "emoji"}), location="root")
     bot = _table(data, "bot")
     extensions = _table(data, "extensions")
     emoji = _table(data, "emoji")
+    _reject_unknown_keys(
+        bot,
+        frozenset({"command_prefix", "operator_user_ids"}),
+        location="bot",
+    )
+    _reject_unknown_keys(
+        extensions,
+        frozenset({"startup_required", "startup_optional"}),
+        location="extensions",
+    )
+    _reject_unknown_keys(
+        emoji,
+        frozenset({"enabled", "allowed_channel_ids"}),
+        location="emoji",
+    )
 
     default_prefix = "!" if development else "?"
     prefix = bot.get("command_prefix", default_prefix)

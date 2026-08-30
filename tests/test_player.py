@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
 
+from charlotte.errors import AccessDeniedError
 from charlotte.music.models import PreparedAudio
 from charlotte.music.player import GuildPlayer
 from charlotte.music.provider import ProviderRegistry
+from charlotte.providers.ytdlp_common import run_blocking
 from tests.fakes import (
     FakeBot,
     FakeGuild,
@@ -80,6 +83,66 @@ class SlowCancelPrefetchProvider(GatedPrefetchProvider):
                 source.cleanup()
                 raise
         return PreparedAudio(source=source, seekable=True)
+
+
+class SlowCancelCurrentProvider(GatedPrefetchProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.current_created = asyncio.Event()
+        self.cancel_started = asyncio.Event()
+        self.release_cancel = asyncio.Event()
+
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+        source = self._source()
+        if self.prepare_calls == 1:
+            self.current_created.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancel_started.set()
+                await asyncio.shield(self.release_cancel.wait())
+                source.cleanup()
+                raise
+        return PreparedAudio(source=source, seekable=True)
+
+
+class DetachedCurrentProvider(GatedPrefetchProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.current_started = threading.Event()
+        self.release_current = threading.Event()
+
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+        if self.prepare_calls == 1:
+
+            def create():
+                self.current_started.set()
+                self.release_current.wait(timeout=2)
+                return self._source()
+
+            source = await run_blocking(
+                create,
+                cleanup_cancelled_result=lambda cancelled: cancelled.cleanup(),
+            )
+        else:
+            source = self._source()
+        return PreparedAudio(source=source, seekable=True)
+
+
+class DelayedReconnectChannel(FakeVoiceChannel):
+    def __init__(self, guild, channel_id, name) -> None:
+        super().__init__(guild, channel_id, name)
+        self.delay_reconnect = False
+        self.reconnect_started = asyncio.Event()
+        self.release_reconnect = asyncio.Event()
+
+    async def connect(self, *, timeout, reconnect):  # noqa: ASYNC109
+        if self.delay_reconnect:
+            self.reconnect_started.set()
+            await self.release_reconnect.wait()
+        return await super().connect(timeout=timeout, reconnect=reconnect)
 
 
 def build_player(app_config, guild_id=1, *, provider_delay=0):
@@ -288,4 +351,160 @@ async def test_human_join_during_empty_leave_cancels_disconnect(app_config) -> N
     assert not await asyncio.wait_for(leave, 1)
     assert player.bot_channel is channel
     assert player.current is not None and player.current.title == "current"
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_owned_current_prepare_before_new_sources(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = SlowCancelCurrentProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    first_add = asyncio.create_task(player.add(make_track("first")))
+    await asyncio.wait_for(provider.current_created.wait(), 1)
+    stopping = asyncio.create_task(player.stop())
+    await asyncio.wait_for(provider.cancel_started.wait(), 1)
+    second_add = asyncio.create_task(player.add(make_track("second")))
+    await asyncio.sleep(0.02)
+    assert not stopping.done()
+    assert not second_add.done()
+
+    provider.release_cancel.set()
+    await asyncio.wait_for(stopping, 1)
+    with pytest.raises(asyncio.CancelledError):
+        await first_add
+    await asyncio.wait_for(second_add, 1)
+    await player.add(make_track("third"))
+    await asyncio.sleep(0.02)
+    assert provider.max_live_sources <= 2
+    assert provider.sources[0].cleaned
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_new_prepare_waits_for_detached_constructor_cleanup(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = DetachedCurrentProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    first_add = asyncio.create_task(player.add(make_track("first")))
+    assert await asyncio.to_thread(provider.current_started.wait, 1)
+    await asyncio.wait_for(player.stop(), 1)
+    with pytest.raises(asyncio.CancelledError):
+        await first_add
+
+    second_add = asyncio.create_task(player.add(make_track("second")))
+    await asyncio.sleep(0.02)
+    assert not second_add.done()
+    assert provider.prepare_calls == 1
+
+    provider.release_current.set()
+    await asyncio.wait_for(second_add, 1)
+    await player.add(make_track("third"))
+    await asyncio.sleep(0.02)
+    assert provider.max_live_sources <= 2
+    assert provider.sources[0].cleaned
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_detached_constructor_does_not_block_another_guild(app_config) -> None:
+    first_player, first_channel, _, _ = build_player(app_config, guild_id=1)
+    second_player, second_channel, _, _ = build_player(app_config, guild_id=2)
+    provider = DetachedCurrentProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    first_player.providers = providers
+    second_player.providers = providers
+    await first_player.connect(first_channel)
+    await second_player.connect(second_channel)
+
+    first_add = asyncio.create_task(first_player.add(make_track("first")))
+    assert await asyncio.to_thread(provider.current_started.wait, 1)
+    await asyncio.wait_for(first_player.stop(), 1)
+    with pytest.raises(asyncio.CancelledError):
+        await first_add
+
+    await asyncio.wait_for(second_player.add(make_track("independent")), 1)
+    assert second_player.current is not None
+    assert second_player.current.title == "independent"
+
+    provider.release_current.set()
+    await first_player.close()
+    await second_player.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_serializes_with_remote_move_and_play(app_config) -> None:
+    bot = FakeBot()
+    guild = FakeGuild(1)
+    old_channel = DelayedReconnectChannel(guild, 10, "old")
+    new_channel = FakeVoiceChannel(guild, 11, "new")
+    text = FakeTextChannel(500)
+    bot.guilds[guild.id] = guild
+    bot.channels[text.id] = text
+    provider = FakeProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player = GuildPlayer(
+        guild.id,
+        bot=bot,
+        config=app_config,
+        providers=providers,
+        reporter=FakeReporter(),
+    )
+    await player.connect(old_channel)
+    first = make_track("first")
+    await player.add(first)
+    disconnected = player.voice_client
+    assert disconnected is not None
+    disconnected.connected = False
+    guild.voice_client = None
+    old_channel.delay_reconnect = True
+
+    recovery = asyncio.create_task(player.recover_voice(old_channel, expected_track_id=first.id))
+    await asyncio.wait_for(old_channel.reconnect_started.wait(), 1)
+
+    async def remote_play():
+        await player.stop()
+        await player.connect(new_channel)
+        await player.add(make_track("remote"))
+
+    remote = asyncio.create_task(remote_play())
+    await asyncio.sleep(0.02)
+    assert not remote.done()
+    old_channel.release_reconnect.set()
+    await asyncio.wait_for(recovery, 1)
+    await asyncio.wait_for(remote, 1)
+    assert player.bot_channel is new_channel
+    assert player.current is not None and player.current.title == "remote"
+    assert guild.voice_client is player.voice_client
+    await player.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["skip", "pause", "resume", "stop", "leave"])
+async def test_control_rechecks_access_at_mutation_boundary(app_config, transition) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    if transition == "resume":
+        await player.pause()
+
+    allowed = True
+    await player.lock.acquire()
+    operation = asyncio.create_task(getattr(player, transition)(access_check=lambda _: allowed))
+    await asyncio.sleep(0)
+    allowed = False
+    player.lock.release()
+    with pytest.raises(AccessDeniedError):
+        await asyncio.wait_for(operation, 1)
+    assert player.current is not None and player.current.title == "current"
+    assert player.bot_channel is channel
     await player.close()

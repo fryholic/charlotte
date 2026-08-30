@@ -122,7 +122,6 @@ class UploadProvider:
             source, stderr_sink = await run_blocking(
                 create,
                 cleanup_cancelled_result=cleanup_cancelled,
-                wait_for_cleanup_on_cancel=True,
             )
         except BaseException:
             playback_buffer.close()

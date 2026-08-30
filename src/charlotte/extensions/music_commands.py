@@ -9,6 +9,7 @@ import discord
 from discord.ext import commands
 
 from charlotte.errors import (
+    AccessDeniedError,
     ExtensionOperationError,
     SourceUnavailableError,
     UserError,
@@ -168,7 +169,11 @@ class MusicCommandsCog(commands.Cog):
             return
         if not await self._control_allowed(ctx, player):
             return
-        result = await player.skip()
+        try:
+            result = await player.skip(access_check=self._control_guard(ctx))
+        except AccessDeniedError:
+            await self._control_allowed(ctx, player)
+            return
         if result.skipped_title is None:
             await self._send(ctx, render("music.skip.empty"))
             return
@@ -209,7 +214,11 @@ class MusicCommandsCog(commands.Cog):
         if player.is_paused:
             await self._send(ctx, render("music.pause.already_paused"))
             return
-        track = await player.pause()
+        try:
+            track = await player.pause(access_check=self._control_guard(ctx))
+        except AccessDeniedError:
+            await self._control_allowed(ctx, player)
+            return
         if track is None:
             await self._send(ctx, render("music.pause.empty"))
             return
@@ -227,7 +236,11 @@ class MusicCommandsCog(commands.Cog):
         if not player.is_paused:
             await self._send(ctx, render("music.resume.not_paused"))
             return
-        track = await player.resume()
+        try:
+            track = await player.resume(access_check=self._control_guard(ctx))
+        except AccessDeniedError:
+            await self._control_allowed(ctx, player)
+            return
         if track is None:
             await self._send(ctx, render("music.resume.not_paused"))
             return
@@ -242,7 +255,11 @@ class MusicCommandsCog(commands.Cog):
             return
         if not await self._control_allowed(ctx, player):
             return
-        result = await player.stop()
+        try:
+            result = await player.stop(access_check=self._control_guard(ctx))
+        except AccessDeniedError:
+            await self._control_allowed(ctx, player)
+            return
         if result.removed_count == 0:
             await self._send(ctx, render("music.stop.empty"))
             return
@@ -257,7 +274,11 @@ class MusicCommandsCog(commands.Cog):
             return
         if not await self._control_allowed(ctx, player):
             return
-        channel_name, result = await player.leave()
+        try:
+            channel_name, result = await player.leave(access_check=self._control_guard(ctx))
+        except AccessDeniedError:
+            await self._control_allowed(ctx, player)
+            return
         await self._send(
             ctx,
             render(
@@ -333,7 +354,10 @@ class MusicCommandsCog(commands.Cog):
             and after.channel is None
             and player.current is not None
         ):
-            await player.recover_voice(before.channel)
+            await player.recover_voice(
+                before.channel,
+                expected_track_id=player.current.id,
+            )
             return
         channel = player.bot_channel
         if channel is not None and not any(not item.bot for item in channel.members):
@@ -345,6 +369,15 @@ class MusicCommandsCog(commands.Cog):
             return True
         await self._send(ctx, render(_access_message_id(decision.reason)))
         return False
+
+    def _control_guard(self, ctx: commands.Context):
+        return lambda channel: (
+            decide_control(
+                ctx.author,
+                channel,
+                self.bot.config.operator_user_ids,
+            ).allowed
+        )
 
     async def _operator_allowed(self, ctx: commands.Context) -> bool:
         if ctx.author.id in self.bot.config.operator_user_ids:

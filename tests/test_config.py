@@ -78,6 +78,22 @@ def test_duplicate_or_invalid_discord_ids_are_rejected(tmp_path) -> None:
         load_config({"DISCORD_TOKEN": "secret", "CHARLOTTE_CONFIG": str(path)})
 
 
+@pytest.mark.parametrize(
+    "content,location",
+    [
+        ("unexpected = true\n", "root"),
+        ("[bot]\ncommand_prefx = '!'\n", "bot"),
+        ("[extensions]\nstartup_require = []\n", "extensions"),
+        ("[emoji]\nallowed_channel_id = [123]\n", "emoji"),
+    ],
+)
+def test_unknown_toml_keys_are_fatal(tmp_path, content, location) -> None:
+    path = tmp_path / "typo.toml"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ConfigError, match=f"Unknown {location}"):
+        load_config({"DISCORD_TOKEN": "secret", "CHARLOTTE_CONFIG": str(path)})
+
+
 def test_legacy_environment_values_are_never_stored() -> None:
     config = load_config(
         {
