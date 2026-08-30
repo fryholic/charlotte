@@ -8,7 +8,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from charlotte.errors import AccessDeniedError, ProviderError, QueueLimitError, ResourceCleanupError
+from charlotte.errors import (
+    AccessDeniedError,
+    PlaybackError,
+    ProviderError,
+    QueueLimitError,
+    ResourceCleanupError,
+)
 from charlotte.music.models import PreparedAudio
 from charlotte.music.player import GuildPlayer
 from charlotte.music.provider import ProviderRegistry
@@ -21,6 +27,7 @@ from tests.fakes import (
     FakeSource,
     FakeTextChannel,
     FakeVoiceChannel,
+    FakeVoiceClient,
     make_track,
 )
 
@@ -249,6 +256,55 @@ class DelayedReconnectChannel(FakeVoiceChannel):
         return await super().connect(timeout=timeout, reconnect=reconnect)
 
 
+class InternallyTimedConnectChannel(FakeVoiceChannel):
+    def __init__(self, guild, channel_id, name) -> None:
+        super().__init__(guild, channel_id, name)
+        self.attempts = 0
+
+    async def connect(self, *, timeout, reconnect):  # noqa: ASYNC109
+        self.attempts += 1
+        if self.attempts == 1:
+            ghost = FakeVoiceClient(self)
+            self.guild.voice_client = ghost
+            try:
+                async with asyncio.timeout(timeout):
+                    await asyncio.sleep(timeout * 2)
+            except TimeoutError:
+                await ghost.disconnect(force=True)
+                raise
+        if self.guild.voice_client is not None:
+            raise RuntimeError("already connected")
+        return await super().connect(timeout=timeout, reconnect=reconnect)
+
+
+class CancelledConnectChannel(FakeVoiceChannel):
+    def __init__(self, guild, channel_id, name) -> None:
+        super().__init__(guild, channel_id, name)
+        self.attempts = 0
+        self.started = asyncio.Event()
+
+    async def connect(self, *, timeout, reconnect):  # noqa: ASYNC109
+        self.attempts += 1
+        if self.attempts == 1:
+            self.guild.voice_client = FakeVoiceClient(self)
+            self.started.set()
+            await asyncio.Event().wait()
+        if self.guild.voice_client is not None:
+            raise RuntimeError("already connected")
+        return await super().connect(timeout=timeout, reconnect=reconnect)
+
+
+class AdvancingReconnectChannel(FakeVoiceChannel):
+    def __init__(self, guild, channel_id, name, player) -> None:
+        super().__init__(guild, channel_id, name)
+        self.player = player
+
+    async def connect(self, *, timeout, reconnect):  # noqa: ASYNC109
+        voice = await super().connect(timeout=timeout, reconnect=reconnect)
+        await self.player._advance()
+        return voice
+
+
 def build_player(app_config, guild_id=1, *, provider_delay=0):
     bot = FakeBot()
     guild = FakeGuild(guild_id)
@@ -411,6 +467,66 @@ async def test_slow_prefetch_never_creates_a_third_source(app_config, transition
     assert player.current is not None and player.current.title == "next"
     assert provider.max_live_sources <= 2
     assert reporter.reports == []
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_internal_connect_timeout_cleans_cache_before_consecutive_connect(
+    app_config, monkeypatch
+) -> None:
+    player, original_channel, _, _ = build_player(app_config)
+    channel = InternallyTimedConnectChannel(original_channel.guild, 99, "timed")
+    monkeypatch.setattr("charlotte.music.player.VOICE_OPERATION_TIMEOUT", 0.02)
+
+    with pytest.raises(TimeoutError):
+        await player.connect(channel)
+
+    assert channel.guild.voice_client is None
+    assert not await player.connect(channel)
+    assert channel.guild.voice_client is player.voice_client
+    assert channel.attempts == 2
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_connect_cleans_cache_before_consecutive_connect(app_config) -> None:
+    player, original_channel, _, _ = build_player(app_config)
+    channel = CancelledConnectChannel(original_channel.guild, 99, "cancelled")
+    first = asyncio.create_task(player.connect(channel))
+    await asyncio.wait_for(channel.started.wait(), 1)
+
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert channel.guild.voice_client is None
+    assert not await player.connect(channel)
+    assert channel.guild.voice_client is player.voice_client
+    assert channel.attempts == 2
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_move_disconnects_uncertain_voice_before_reconnect(
+    app_config, monkeypatch
+) -> None:
+    player, old_channel, _, _ = build_player(app_config)
+    new_channel = FakeVoiceChannel(old_channel.guild, 99, "new")
+    await player.connect(old_channel)
+    voice = player.voice_client
+    assert voice is not None
+
+    async def ignore_move(channel, *, timeout):  # noqa: ASYNC109
+        return None
+
+    monkeypatch.setattr(voice, "move_to", ignore_move)
+    with pytest.raises(PlaybackError, match="did not reach"):
+        await player.connect(new_channel)
+
+    assert not voice.is_connected()
+    assert old_channel.guild.voice_client is None
+    assert not await player.connect(new_channel)
+    assert player.bot_channel is new_channel
     await player.close()
 
 
@@ -625,6 +741,32 @@ async def test_advance_preserves_queue_until_voice_recovery(app_config) -> None:
     assert player.current is following
     assert channel.guild.voice_client is not None
     assert channel.guild.voice_client.is_playing()
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_recovery_adopts_candidate_before_queue_advance_can_use_it(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    current = make_track("current")
+    following = make_track("following")
+    await player.add(current)
+    await player.add(following)
+    await asyncio.sleep(0.02)
+    generation = player._generation
+    disconnected = player.voice_client
+    assert disconnected is not None
+    disconnected.connected = False
+    channel.guild.voice_client = None
+    await player._on_finished(current.id, generation, None)
+    recovery_channel = AdvancingReconnectChannel(channel.guild, 99, "recovery", player)
+
+    await player.recover_voice(recovery_channel, expected_track_id=None)
+
+    assert player.current is following
+    assert player.bot_channel is recovery_channel
+    assert player.voice_client is recovery_channel.guild.voice_client
+    assert player.voice_client is not None and player.voice_client.is_playing()
     await player.close()
 
 
@@ -908,6 +1050,12 @@ async def test_prefetch_failure_consumes_the_track_retry_budget(app_config) -> N
             break
         await asyncio.sleep(0.01)
     assert following.failure_retries == 1
+
+    await player.add(make_track("third"))
+    await asyncio.sleep(0.02)
+    await player.add(make_track("fourth"))
+    await asyncio.sleep(0.02)
+    assert provider.calls_by_title["next"] == 1
 
     channel.guild.voice_client.finish()
     for _ in range(100):

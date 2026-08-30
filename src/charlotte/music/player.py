@@ -75,6 +75,7 @@ class GuildPlayer:
         self.lock = asyncio.Lock()
         self._connection_lock = asyncio.Lock()
         self._advance_lock = asyncio.Lock()
+        self._voice_recovery_in_progress = False
         self._receipt_condition = asyncio.Condition()
         self._issued_receipt = 0
         self._next_receipt = 0
@@ -224,10 +225,17 @@ class GuildPlayer:
                 "Voice connecting",
                 extra={"event": "voice.connecting", "channel_id": channel.id},
             )
-            async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
-                self.voice_client = await channel.connect(
-                    timeout=VOICE_OPERATION_TIMEOUT, reconnect=True
+            try:
+                connected = await channel.connect(timeout=VOICE_OPERATION_TIMEOUT, reconnect=True)
+                if not connected.is_connected() or connected.channel != channel:
+                    raise PlaybackError("Voice connection did not reach the requested channel")
+            except Exception, asyncio.CancelledError:
+                await self._cleanup_failed_voice_connection(
+                    getattr(channel, "guild", None),
+                    getattr(getattr(channel, "guild", None), "voice_client", None),
                 )
+                raise
+            self.voice_client = connected
             self.log.info(
                 "Voice connected",
                 extra={"event": "voice.connected", "channel_id": channel.id},
@@ -238,8 +246,13 @@ class GuildPlayer:
                 "Voice moving",
                 extra={"event": "voice.moving", "channel_id": channel.id},
             )
-            async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
-                await voice.move_to(channel)
+            try:
+                await voice.move_to(channel, timeout=VOICE_OPERATION_TIMEOUT)
+                if not voice.is_connected() or voice.channel != channel:
+                    raise PlaybackError("Voice move did not reach the requested channel")
+            except Exception, asyncio.CancelledError:
+                await self._cleanup_failed_voice_connection(getattr(channel, "guild", None), voice)
+                raise
             self.log.info(
                 "Voice moved",
                 extra={"event": "voice.connected", "channel_id": channel.id},
@@ -607,6 +620,7 @@ class GuildPlayer:
         notification: str | None = None
         report_error = False
         advance_queue = False
+        recovery_gate = False
         async with self._connection_lock:
             if self._active_voice_client() is not None:
                 return
@@ -636,82 +650,99 @@ class GuildPlayer:
                     was_paused = self._paused
                     self.current_prepared = None
                     track.state = TrackState.PREPARING
+                self._voice_recovery_in_progress = True
+                recovery_gate = True
                 self.voice_client = None
                 self._generation += 1
                 generation = self._generation
-            if previous is not None:
-                await self._safe_cleanup_prepared(previous, "music.recovery.cleanup_failed")
+            try:
+                if previous is not None:
+                    await self._safe_cleanup_prepared(previous, "music.recovery.cleanup_failed")
 
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + VOICE_RECONNECT_WINDOW
-            candidate: discord.VoiceClient | None = None
-            for _ in range(VOICE_RECONNECT_ATTEMPTS):
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                try:
-                    async with asyncio.timeout(remaining):
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + VOICE_RECONNECT_WINDOW
+                candidate: discord.VoiceClient | None = None
+                for _ in range(VOICE_RECONNECT_ATTEMPTS):
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        break
+                    try:
                         candidate = await channel.connect(
                             timeout=min(5.0, remaining), reconnect=False
                         )
-                    break
-                except Exception as exc:
-                    last_error = exc
-
-            async with self.lock:
-                if queue_only:
-                    valid = (
-                        self.current is None
-                        and bool(self.queue)
-                        and self.queue[0] is track
-                        and self._generation == generation
-                        and not self._closed
-                    )
-                else:
-                    valid = (
-                        self.current is track
-                        and self._generation == generation
-                        and not self._closed
-                    )
-            if not valid:
-                if candidate is not None:
-                    try:
-                        async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
-                            await candidate.disconnect(force=True)
+                        break
+                    except asyncio.CancelledError:
+                        await self._cleanup_failed_voice_connection(
+                            getattr(channel, "guild", None),
+                            getattr(getattr(channel, "guild", None), "voice_client", None),
+                        )
+                        raise
                     except Exception as exc:
-                        log_exception(self.log, exc, event="music.recovery.stale_disconnect_failed")
-                return
-            self.voice_client = candidate
+                        last_error = exc
+                        await self._cleanup_failed_voice_connection(
+                            getattr(channel, "guild", None),
+                            getattr(getattr(channel, "guild", None), "voice_client", None),
+                        )
 
-            if self._active_voice_client() is None:
-                if not queue_only:
+                async with self.lock:
+                    if queue_only:
+                        valid = (
+                            self.current is None
+                            and bool(self.queue)
+                            and self.queue[0] is track
+                            and self._generation == generation
+                            and not self._closed
+                        )
+                    else:
+                        valid = (
+                            self.current is track
+                            and self._generation == generation
+                            and not self._closed
+                        )
+                    if valid:
+                        self.voice_client = candidate
+                    self._voice_recovery_in_progress = False
+                    recovery_gate = False
+                if not valid:
+                    if candidate is not None:
+                        await self._cleanup_failed_voice_connection(
+                            getattr(channel, "guild", None), candidate
+                        )
+                    return
+
+                if self._active_voice_client() is None:
+                    if not queue_only:
+                        await self._discard_current_preserve_queue(track, generation)
+                    notification = render("music.voice.reconnect_failed")
+                    report_error = last_error is not None
+                elif queue_only:
+                    notification = render("music.voice.reconnected")
+                    advance_queue = True
+                elif preparing and previous is None:
+                    started = await self._prepare_current(track, generation, attempts=1)
+                    if started:
+                        notification = render("music.voice.reconnected")
+                elif not seekable:
                     await self._discard_current_preserve_queue(track, generation)
-                notification = render("music.voice.reconnect_failed")
-                report_error = last_error is not None
-            elif queue_only:
-                notification = render("music.voice.reconnected")
-                advance_queue = True
-            elif preparing and previous is None:
-                started = await self._prepare_current(track, generation, attempts=1)
-                if started:
-                    notification = render("music.voice.reconnected")
-            elif not seekable:
-                await self._discard_current_preserve_queue(track, generation)
-                notification = render(
-                    "music.voice.reconnect_unseekable", title=self._safe_title(track.title)
-                )
-                await self._advance()
-            else:
-                started = await self._prepare_current(
-                    track, generation, attempts=1, start_at=offset
-                )
-                if started:
-                    if was_paused:
-                        await self._restore_pause(track, generation)
-                    notification = render("music.voice.reconnected")
+                    notification = render(
+                        "music.voice.reconnect_unseekable", title=self._safe_title(track.title)
+                    )
+                    await self._advance()
+                else:
+                    started = await self._prepare_current(
+                        track, generation, attempts=1, start_at=offset
+                    )
+                    if started:
+                        if was_paused:
+                            await self._restore_pause(track, generation)
+                        notification = render("music.voice.reconnected")
 
-            if advance_queue:
-                await self._advance()
+                if advance_queue:
+                    await self._advance()
+            finally:
+                if recovery_gate:
+                    async with self.lock:
+                        self._voice_recovery_in_progress = False
 
         if notification is not None:
             await self._notify(track.request_channel_id, notification)
@@ -918,6 +949,7 @@ class GuildPlayer:
         async with self.lock:
             if (
                 self._closed
+                or self._voice_recovery_in_progress
                 or self.current is not None
                 or not self.queue
                 or self._active_voice_client() is None
@@ -990,6 +1022,8 @@ class GuildPlayer:
         ):
             return
         track = self.queue[0]
+        if track.failure_retries >= 1:
+            return
         self.prepared_next_track_id = track.id
         generation = self._generation
         self._prefetch_task = self._spawn(self._prefetch(track, generation))
@@ -1356,6 +1390,45 @@ class GuildPlayer:
             self.voice_client = guild_voice
             return guild_voice
         return None
+
+    async def _cleanup_failed_voice_connection(
+        self,
+        guild: object | None,
+        *voices: discord.VoiceClient | None,
+    ) -> None:
+        """Remove partially connected clients from Discord's guild voice cache."""
+
+        candidates: list[discord.VoiceClient] = []
+        for voice in (*voices, self.voice_client):
+            if voice is not None and all(voice is not candidate for candidate in candidates):
+                candidates.append(voice)
+        self.voice_client = None
+        for voice in candidates:
+            try:
+                async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
+                    await voice.disconnect(force=True)
+            except BaseException as exc:
+                cleanup = getattr(voice, "cleanup", None)
+                try:
+                    if callable(cleanup):
+                        cleanup()
+                except Exception as cleanup_exc:
+                    log_exception(
+                        self.log,
+                        cleanup_exc,
+                        event="voice.failed_connection_cache_cleanup_failed",
+                    )
+                if not isinstance(exc, asyncio.CancelledError):
+                    log_exception(
+                        self.log,
+                        exc,
+                        event="voice.failed_connection_disconnect_failed",
+                    )
+            if getattr(guild, "voice_client", None) is voice:
+                try:
+                    guild.voice_client = None  # type: ignore[attr-defined]
+                except AttributeError, TypeError:
+                    pass
 
     def _playback_offset_locked(self) -> float:
         now = self._pause_started_at or asyncio.get_running_loop().time()

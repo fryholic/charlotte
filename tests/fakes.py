@@ -129,7 +129,7 @@ class FakeVoiceClient:
         if callback is not None:
             callback(error)
 
-    async def move_to(self, channel) -> None:
+    async def move_to(self, channel, *, timeout=None) -> None:  # noqa: ASYNC109
         self.channel = channel
 
     async def disconnect(self, *, force=False) -> None:
