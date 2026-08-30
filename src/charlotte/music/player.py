@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from collections.abc import Callable
 from typing import Any
 
 import discord
@@ -255,6 +256,7 @@ class GuildPlayer:
     async def stop(self) -> StopResult:
         async with self.lock:
             result = await self._stop_locked()
+            assert result is not None
         self.log.info(
             "Queue cleared",
             extra={
@@ -295,7 +297,17 @@ class GuildPlayer:
                     not getattr(member, "bot", False) for member in members
                 ):
                     return False
-                result = await self._stop_locked()
+                result = await self._stop_locked(
+                    still_valid=lambda: (
+                        getattr(self._active_voice_client(), "channel", None) is expected_channel
+                        and not any(
+                            not getattr(member, "bot", False)
+                            for member in getattr(expected_channel, "members", ())
+                        )
+                    )
+                )
+                if result is None:
+                    return False
             voice = self._active_voice_client()
             if voice is None or getattr(voice, "channel", None) is not expected_channel:
                 return False
@@ -627,11 +639,22 @@ class GuildPlayer:
             raise
         self._safe_cleanup_prepared(prepared, "music.prefetch.invalid_cleanup_failed")
 
-    async def _stop_locked(self) -> StopResult:
+    async def _stop_locked(
+        self, *, still_valid: Callable[[], bool] | None = None
+    ) -> StopResult | None:
         prefetch_task = self._prefetch_task
         if prefetch_task is not None and not prefetch_task.done():
             prefetch_task.cancel()
             await asyncio.gather(prefetch_task, return_exceptions=True)
+        if still_valid is not None and not still_valid():
+            stale_prepared = self.prepared_next
+            self.prepared_next = None
+            self.prepared_next_track_id = None
+            self._prefetch_task = None
+            if stale_prepared is not None:
+                self._safe_cleanup_prepared(stale_prepared, "music.prefetch.stale_cleanup_failed")
+            self._ensure_prefetch_locked()
+            return None
         current = self.current
         prepared = self.current_prepared
         queued = list(self.queue)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,6 +56,27 @@ class GatedPrefetchProvider(FakeProvider):
             try:
                 await self.release_prefetch.wait()
             except asyncio.CancelledError:
+                source.cleanup()
+                raise
+        return PreparedAudio(source=source, seekable=True)
+
+
+class SlowCancelPrefetchProvider(GatedPrefetchProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancel_started = asyncio.Event()
+        self.release_cancel = asyncio.Event()
+
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+        source = self._source()
+        if track.title == "next" and self.prepare_calls == 2:
+            self.prefetch_created.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancel_started.set()
+                await asyncio.shield(self.release_cancel.wait())
                 source.cleanup()
                 raise
         return PreparedAudio(source=source, seekable=True)
@@ -244,4 +266,26 @@ async def test_stale_empty_channel_event_cannot_disconnect_remote_move(app_confi
     assert not await asyncio.wait_for(stale_leave, 1)
     assert player.bot_channel is new_channel
     assert player.current is not None and player.current.title == "new"
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_human_join_during_empty_leave_cancels_disconnect(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = SlowCancelPrefetchProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    await player.add(make_track("next"))
+    await asyncio.wait_for(provider.prefetch_created.wait(), 1)
+
+    leave = asyncio.create_task(player.leave_if_empty(channel))
+    await asyncio.wait_for(provider.cancel_started.wait(), 1)
+    channel.members.append(SimpleNamespace(bot=False))
+    provider.release_cancel.set()
+    assert not await asyncio.wait_for(leave, 1)
+    assert player.bot_channel is channel
+    assert player.current is not None and player.current.title == "current"
     await player.close()
