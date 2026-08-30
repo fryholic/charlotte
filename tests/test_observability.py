@@ -1,4 +1,10 @@
-from charlotte.observability import ErrorContext, ErrorReporter, redact, redact_url
+import json
+import logging
+from types import SimpleNamespace
+
+import pytest
+
+from charlotte.observability import ErrorContext, ErrorReporter, JsonFormatter, redact, redact_url
 
 
 def test_redacts_credentials_and_sensitive_query_values() -> None:
@@ -32,6 +38,22 @@ def test_redacts_direct_media_url_path_and_query() -> None:
     assert "media.example.net" in value
 
 
+def test_json_formatter_redacts_registered_token_without_assignment_context() -> None:
+    token = "raw.discord.token"
+    record = logging.LogRecord(
+        "charlotte.test",
+        logging.ERROR,
+        __file__,
+        1,
+        f"login failed with {token}",
+        (),
+        None,
+    )
+    payload = json.loads(JsonFormatter(secrets=(token,)).format(record))
+    assert token not in payload["message"]
+    assert "[redacted]" in payload["message"]
+
+
 def test_owner_dm_preserves_required_fields_and_traceback_within_limit(app_config) -> None:
     reporter = ErrorReporter(app_config, error_id_factory=lambda: "fixed-error-id")
     error = RuntimeError("failure " + "x" * 1000)
@@ -52,3 +74,36 @@ def test_owner_dm_preserves_required_fields_and_traceback_within_limit(app_confi
     assert "Traceback:" in body
     assert "traceback-tail" in body
     assert "private" not in body
+
+
+@pytest.mark.asyncio
+async def test_error_reporter_never_raises_for_unprintable_exception(app_config) -> None:
+    class BrokenError(RuntimeError):
+        def __str__(self) -> str:
+            raise RuntimeError("broken str")
+
+    sent = []
+
+    async def send(body, **kwargs):
+        sent.append((body, kwargs))
+
+    reporter = ErrorReporter(app_config, error_id_factory=lambda: "fixed-error-id")
+    reporter._owner = SimpleNamespace(send=send)
+    error_id = await reporter.report(BrokenError(), event="test.broken")
+    assert error_id == "fixed-error-id"
+    assert len(sent) == 1
+    assert "unprintable" in sent[0][0]
+    assert "test-token" not in sent[0][0]
+
+
+def test_owner_dm_redacts_raw_configured_token(app_config) -> None:
+    reporter = ErrorReporter(app_config)
+    body = reporter._render_dm(
+        "fixed-error-id",
+        "test.secret",
+        RuntimeError("test-token"),
+        "trace contains test-token",
+        ErrorContext(message_content="test-token"),
+    )
+    assert "test-token" not in body
+    assert body.count("[redacted]") >= 2

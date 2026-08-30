@@ -29,9 +29,15 @@ class TrackProvider(Protocol):
 
 
 class ProviderRegistry:
-    def __init__(self, *, max_concurrency: int = PROVIDER_MAX_CONCURRENCY) -> None:
+    def __init__(
+        self,
+        *,
+        max_concurrency: int = PROVIDER_MAX_CONCURRENCY,
+        operation_timeout: float = PROVIDER_OPERATION_TIMEOUT,
+    ) -> None:
         self._providers: dict[str, TrackProvider] = {}
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._operation_timeout = operation_timeout
         self._inflight: defaultdict[str, int] = defaultdict(int)
         self._unloading: set[str] = set()
 
@@ -113,7 +119,7 @@ class ProviderRegistry:
             raise ProviderError(f"Provider is unloading: {name}")
         self._inflight[name] += 1
         try:
-            async with asyncio.timeout(PROVIDER_OPERATION_TIMEOUT):
+            async with asyncio.timeout(self._operation_timeout):
                 async with self._semaphore:
                     if name in self._unloading or name not in self._providers:
                         raise ProviderError(f"Provider is unloading: {name}")

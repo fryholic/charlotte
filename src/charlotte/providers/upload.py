@@ -18,6 +18,24 @@ from charlotte.music.models import PreparedAudio, RequestContext, Track
 from charlotte.providers.ytdlp_common import run_blocking
 
 
+class _PipeBufferOwner:
+    def __init__(self, buffer: io.BytesIO, source: discord.FFmpegOpusAudio) -> None:
+        self._buffer = buffer
+        self._source = source
+
+    @property
+    def closed(self) -> bool:
+        return self._buffer.closed
+
+    def close(self) -> None:
+        writer = getattr(self._source, "_pipe_writer_thread", None)
+        if writer is not None and writer.is_alive():
+            writer.join(timeout=5)
+        if writer is not None and writer.is_alive():
+            raise RuntimeError("FFmpeg pipe writer did not stop")
+        self._buffer.close()
+
+
 class UploadProvider:
     name = "upload"
     supports_upload = True
@@ -96,21 +114,22 @@ class UploadProvider:
             source, stderr_sink = result
             try:
                 source.cleanup()
+                _PipeBufferOwner(playback_buffer, source).close()
             finally:
                 stderr_sink.close()
-                playback_buffer.close()
 
         try:
             source, stderr_sink = await run_blocking(
-                create, cleanup_cancelled_result=cleanup_cancelled
+                create,
+                cleanup_cancelled_result=cleanup_cancelled,
+                wait_for_cleanup_on_cancel=True,
             )
         except BaseException:
             playback_buffer.close()
             raise
+        pipe_buffer = _PipeBufferOwner(playback_buffer, source)
         return PreparedAudio(
-            source=source,
-            seekable=True,
-            owned_resources=(playback_buffer, stderr_sink),
+            source=source, seekable=True, owned_resources=(pipe_buffer, stderr_sink)
         )
 
 

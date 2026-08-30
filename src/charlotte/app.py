@@ -69,8 +69,7 @@ class CharlotteBot(commands.Bot):
 
     async def on_ready(self) -> None:
         if not self._owner_resolved:
-            self._owner_resolved = True
-            await self.reporter.resolve_owner(self)
+            self._owner_resolved = await self.reporter.resolve_owner(self)
         self.health_writer.start()
         await self.change_presence(
             activity=discord.Activity(

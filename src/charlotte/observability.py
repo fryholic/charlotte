@@ -87,20 +87,28 @@ def redact_url(value: str) -> str:
     return urlunsplit((parsed.scheme, netloc, path, urlencode(safe_query), ""))
 
 
-def redact(value: object) -> object:
+def redact(value: object, *, secrets: tuple[str, ...] = ()) -> object:
     if isinstance(value, str):
-        scrubbed = _URL.sub(lambda match: redact_url(match.group(0)), value)
+        scrubbed = value
+        for secret in secrets:
+            if secret:
+                scrubbed = scrubbed.replace(secret, "[redacted]")
+        scrubbed = _URL.sub(lambda match: redact_url(match.group(0)), scrubbed)
         scrubbed = _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[redacted]", scrubbed)
         scrubbed = _SECRET_MAPPING.sub(lambda match: f"{match.group(1)}[redacted]", scrubbed)
         scrubbed = _SECRET_HEADER.sub(lambda match: f"{match.group(1)}: [redacted]", scrubbed)
         return scrubbed
     if isinstance(value, dict):
-        return {str(key): redact(item) for key, item in value.items()}
+        return {str(key): redact(item, secrets=secrets) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
-        return [redact(item) for item in value]
+        return [redact(item, secrets=secrets) for item in value]
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return redact(str(value))
+    try:
+        rendered = str(value)
+    except Exception:
+        rendered = f"<{type(value).__name__}: unprintable>"
+    return redact(rendered, secrets=secrets)
 
 
 class JsonFormatter(logging.Formatter):
@@ -108,9 +116,15 @@ class JsonFormatter(logging.Formatter):
 
     _standard = frozenset(logging.makeLogRecord({}).__dict__)
 
-    def __init__(self, *, environment: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        environment: str | None = None,
+        secrets: tuple[str, ...] = (),
+    ) -> None:
         super().__init__()
         self.environment = environment
+        self.secrets = secrets
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
@@ -126,16 +140,29 @@ class JsonFormatter(logging.Formatter):
                 payload[key] = value
         if record.exc_info and "traceback" not in payload:
             payload["traceback"] = "".join(traceback.format_exception(*record.exc_info))
-        return json.dumps(redact(payload), ensure_ascii=False, separators=(",", ":"))
+        return json.dumps(
+            redact(payload, secrets=self.secrets),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
 
 
 def configure_logging(config: AppConfig) -> None:
-    configure_log_level(config.log_level, environment=config.environment.value)
+    configure_log_level(
+        config.log_level,
+        environment=config.environment.value,
+        secrets=(config.discord_token.reveal(),),
+    )
 
 
-def configure_log_level(level: str, *, environment: str | None = None) -> None:
+def configure_log_level(
+    level: str,
+    *,
+    environment: str | None = None,
+    secrets: tuple[str, ...] = (),
+) -> None:
     handler = logging.StreamHandler()
-    handler.setFormatter(JsonFormatter(environment=environment))
+    handler.setFormatter(JsonFormatter(environment=environment, secrets=secrets))
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
@@ -165,7 +192,7 @@ def log_exception(
             "error_id": error_id,
             "context": context or {},
             "exception_type": type(error).__name__,
-            "traceback": "".join(traceback.format_exception(error)),
+            "traceback": _format_exception_safe(error),
         },
     )
     return error_id
@@ -205,13 +232,16 @@ class ErrorReporter:
         self.log = logging.getLogger("charlotte.errors")
         self._owner: discord.abc.User | None = None
         self._last_sent: dict[str, tuple[float, int]] = {}
+        self._secrets = (config.discord_token.reveal(),)
 
-    async def resolve_owner(self, bot: discord.Client) -> None:
+    async def resolve_owner(self, bot: discord.Client) -> bool:
         try:
             info = await bot.application_info()
             self._owner = info.owner
+            return self._owner is not None
         except Exception as error:
             log_exception(self.log, error, event="reporter.owner_failed")
+            return False
 
     def expected(
         self,
@@ -238,35 +268,50 @@ class ErrorReporter:
         notify_owner: bool = True,
     ) -> str:
         details = context or ErrorContext()
-        full_traceback = "".join(traceback.format_exception(error))
-        error_id = str(self._error_id_factory())
-        error_id = log_exception(
-            self.log,
-            error,
-            event=event,
-            context=details.compact(),
-            error_id=error_id,
-        )
-        if (
-            notify_owner
-            and self._owner is not None
-            and self._should_send(event, error, full_traceback)
-        ):
-            body = self._render_dm(error_id, event, error, full_traceback, details)
+        try:
+            error_id = str(self._error_id_factory())
+        except Exception:
+            error_id = str(uuid.uuid4())
+        full_traceback = _format_exception_safe(error)
+        try:
+            error_id = log_exception(
+                self.log,
+                error,
+                event=event,
+                context=details.compact(),
+                error_id=error_id,
+            )
+        except Exception:
+            self.log.error(
+                "error reporting log fallback",
+                extra={"event": "reporter.log_failed", "error_id": error_id},
+            )
+        if notify_owner and self._owner is not None:
             try:
+                if not self._should_send(event, error, full_traceback):
+                    return error_id
+                body = self._render_dm(error_id, event, error, full_traceback, details)
                 async with asyncio.timeout(OWNER_DM_TIMEOUT):
                     await self._owner.send(body, allowed_mentions=discord.AllowedMentions.none())
                 self.log.info(
                     "owner error DM sent", extra={"event": "reporter.dm_sent", "error_id": error_id}
                 )
-            except Exception as dm_error:
-                log_exception(
-                    self.log,
-                    dm_error,
-                    event="reporter.dm_failed",
-                    context={"origin_error_id": error_id},
-                    level=logging.WARNING,
-                )
+            except BaseException as dm_error:
+                if isinstance(dm_error, (asyncio.CancelledError, KeyboardInterrupt, SystemExit)):
+                    raise
+                try:
+                    log_exception(
+                        self.log,
+                        dm_error,
+                        event="reporter.dm_failed",
+                        context={"origin_error_id": error_id},
+                        level=logging.WARNING,
+                    )
+                except Exception:
+                    self.log.warning(
+                        "owner error DM failed",
+                        extra={"event": "reporter.dm_failed", "error_id": error_id},
+                    )
         return error_id
 
     def _should_send(self, event: str, error: BaseException, full_traceback: str) -> bool:
@@ -330,9 +375,15 @@ class ErrorReporter:
         context_text = "\n".join(
             f"{label}: {_one_line(value)}" for label, value in context_fields if value is not None
         )
-        context_text = _truncate(str(redact(context_text)), 650)
+        context_text = _truncate(str(redact(context_text, secrets=self._secrets)), 650)
         exception_summary = _truncate(
-            str(redact(f"{type(error).__name__}: {_one_line(error)}")), 220
+            str(
+                redact(
+                    f"{type(error).__name__}: {_one_line(error)}",
+                    secrets=self._secrets,
+                )
+            ),
+            220,
         )
         sections = ["Charlotte에서 오류가 발생했습니다.", mandatory]
         if context_text:
@@ -340,7 +391,7 @@ class ErrorReporter:
         sections.append(f"Exception: {exception_summary}")
         prefix = "\n".join(sections) + "\n\nTraceback:\n"
         remaining = max(0, 1900 - len(prefix))
-        safe_traceback = str(redact(full_traceback))[-remaining:]
+        safe_traceback = str(redact(full_traceback, secrets=self._secrets))[-remaining:]
         return prefix + safe_traceback
 
 
@@ -355,7 +406,18 @@ def _named_id(name: str | None, snowflake: int | None) -> str | None:
 
 
 def _one_line(value: object) -> str:
-    return str(value).replace("\r", " ").replace("\n", " ")
+    try:
+        rendered = str(value)
+    except Exception:
+        rendered = f"<{type(value).__name__}: unprintable>"
+    return rendered.replace("\r", " ").replace("\n", " ")
+
+
+def _format_exception_safe(error: BaseException) -> str:
+    try:
+        return "".join(traceback.format_exception(error))
+    except Exception:
+        return f"{type(error).__module__}.{type(error).__qualname__}: <unprintable exception>"
 
 
 def _truncate(value: str, limit: int) -> str:

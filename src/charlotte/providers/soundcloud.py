@@ -5,11 +5,9 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import ParseResult, urlunparse
 
-import yt_dlp
-
 from charlotte.errors import SourceUnavailableError, UnsupportedContentError, UserInputError
 from charlotte.music.models import PreparedAudio, RequestContext, Track
-from charlotte.providers.ytdlp_common import extract, run_blocking, stream_audio
+from charlotte.providers.ytdlp_common import YtdlpError, extract, stream_audio
 
 _SOUNDCLOUD_HOSTS = {
     "soundcloud.com",
@@ -31,8 +29,8 @@ class SoundCloudProvider:
     ) -> Track:
         normalized = _normalize(parsed_url)
         try:
-            data = await run_blocking(lambda: extract(normalized, playlist=False))
-        except yt_dlp.utils.DownloadError as exc:
+            data = await extract(normalized, playlist=False)
+        except YtdlpError as exc:
             raise SourceUnavailableError("music.soundcloud.unavailable", str(exc)) from exc
         _require_single_track(data)
         extractor = str(data.get("extractor_key", data.get("extractor", ""))).lower()
@@ -67,8 +65,8 @@ class SoundCloudProvider:
     async def prepare(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
         source_url = str(track.provider_data["source_url"])
         try:
-            data = await run_blocking(lambda: extract(source_url, playlist=False))
-        except yt_dlp.utils.DownloadError as exc:
+            data = await extract(source_url, playlist=False)
+        except YtdlpError as exc:
             raise SourceUnavailableError("music.soundcloud.unavailable", str(exc)) from exc
         _require_single_track(data)
         direct_url = data.get("url")

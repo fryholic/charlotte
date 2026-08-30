@@ -254,34 +254,20 @@ class GuildPlayer:
 
     async def stop(self) -> StopResult:
         async with self.lock:
-            current = self.current
-            prepared = self.current_prepared
-            queued = list(self.queue)
-            next_prepared = self.prepared_next
-            self.current = None
-            self.current_prepared = None
-            self.queue.clear()
-            self.prepared_next = None
-            self.prepared_next_track_id = None
-            self._paused = False
-            self._generation += 1
-            voice = self._active_voice_client()
-            if voice is not None and (voice.is_playing() or voice.is_paused()):
-                voice.stop()
-        self._cleanup_detached(current, prepared, queued, next_prepared)
+            result = await self._stop_locked()
         self.log.info(
             "Queue cleared",
             extra={
                 "event": "queue.cleared",
-                "removed_count": (1 if current is not None else 0) + len(queued),
+                "removed_count": result.removed_count,
             },
         )
-        return StopResult((1 if current is not None else 0) + len(queued))
+        return result
 
     async def leave(self) -> tuple[str | None, StopResult]:
-        channel = self.bot_channel
-        result = await self.stop()
         async with self._connection_lock:
+            channel = self.bot_channel
+            result = await self.stop()
             voice = self._active_voice_client()
             if voice is not None:
                 async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
@@ -292,6 +278,39 @@ class GuildPlayer:
             extra={"event": "voice.disconnected", "channel_id": getattr(channel, "id", None)},
         )
         return getattr(channel, "name", None), result
+
+    async def leave_if_empty(self, expected_channel: discord.abc.Connectable) -> bool:
+        """Disconnect only if the same connected channel is still empty of humans."""
+
+        async with self._connection_lock:
+            voice = self._active_voice_client()
+            channel = getattr(voice, "channel", None)
+            if channel is not expected_channel:
+                return False
+            async with self.lock:
+                voice = self._active_voice_client()
+                channel = getattr(voice, "channel", None)
+                members = getattr(channel, "members", ())
+                if channel is not expected_channel or any(
+                    not getattr(member, "bot", False) for member in members
+                ):
+                    return False
+                result = await self._stop_locked()
+            voice = self._active_voice_client()
+            if voice is None or getattr(voice, "channel", None) is not expected_channel:
+                return False
+            async with asyncio.timeout(VOICE_OPERATION_TIMEOUT):
+                await voice.disconnect(force=True)
+            self.voice_client = None
+        self.log.info(
+            "Voice disconnected from empty channel",
+            extra={
+                "event": "voice.empty_disconnected",
+                "channel_id": getattr(expected_channel, "id", None),
+                "removed_count": result.removed_count,
+            },
+        )
+        return True
 
     async def queue_view(self) -> QueueView:
         async with self.lock:
@@ -510,6 +529,7 @@ class GuildPlayer:
 
     async def _advance(self) -> None:
         stale_prepared: PreparedAudio | None = None
+        prefetch_task: asyncio.Task[Any] | None = None
         async with self.lock:
             if self._closed or self.current is not None or not self.queue:
                 return
@@ -520,13 +540,27 @@ class GuildPlayer:
             generation = self._generation
             if self.prepared_next_track_id == track.id:
                 prepared = self.prepared_next
+                if prepared is None:
+                    prefetch_task = self._prefetch_task
             else:
                 prepared = None
                 stale_prepared = self.prepared_next
-            self.prepared_next = None
-            self.prepared_next_track_id = None
+            if prepared is not None or prefetch_task is None:
+                self.prepared_next = None
+                self.prepared_next_track_id = None
+                self._prefetch_task = None
         if stale_prepared is not None:
             self._safe_cleanup_prepared(stale_prepared, "music.prefetch.stale_cleanup_failed")
+        if prefetch_task is not None:
+            await asyncio.gather(prefetch_task, return_exceptions=True)
+            async with self.lock:
+                if self.current is not track or self._generation != generation:
+                    return
+                if self.prepared_next_track_id == track.id:
+                    prepared = self.prepared_next
+                    self.prepared_next = None
+                    self.prepared_next_track_id = None
+                self._prefetch_task = None
         if prepared is not None:
             try:
                 if await self._play_prepared(track, generation, prepared):
@@ -565,9 +599,6 @@ class GuildPlayer:
         except asyncio.CancelledError:
             if prepared is not None:
                 self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
-            async with self.lock:
-                if self.prepared_next_track_id == track.id:
-                    self.prepared_next_track_id = None
             raise
         except Exception as exc:
             async with self.lock:
@@ -578,12 +609,14 @@ class GuildPlayer:
         try:
             async with self.lock:
                 valid = (
-                    self.current is not None
-                    and self._generation == generation
-                    and bool(self.queue)
-                    and self.queue[0] is track
-                    and self.prepared_next_track_id == track.id
-                )
+                    (
+                        self.current is not None
+                        and self._generation == generation
+                        and bool(self.queue)
+                        and self.queue[0] is track
+                    )
+                    or self.current is track
+                ) and self.prepared_next_track_id == track.id
                 if valid:
                     self.prepared_next = prepared
                     return
@@ -593,6 +626,29 @@ class GuildPlayer:
             self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
             raise
         self._safe_cleanup_prepared(prepared, "music.prefetch.invalid_cleanup_failed")
+
+    async def _stop_locked(self) -> StopResult:
+        prefetch_task = self._prefetch_task
+        if prefetch_task is not None and not prefetch_task.done():
+            prefetch_task.cancel()
+            await asyncio.gather(prefetch_task, return_exceptions=True)
+        current = self.current
+        prepared = self.current_prepared
+        queued = list(self.queue)
+        next_prepared = self.prepared_next
+        self.current = None
+        self.current_prepared = None
+        self.queue.clear()
+        self.prepared_next = None
+        self.prepared_next_track_id = None
+        self._prefetch_task = None
+        self._paused = False
+        self._generation += 1
+        voice = self._active_voice_client()
+        if voice is not None and (voice.is_playing() or voice.is_paused()):
+            voice.stop()
+        self._cleanup_detached(current, prepared, queued, next_prepared)
+        return StopResult((1 if current is not None else 0) + len(queued))
 
     async def _fail_current(self, track: Track, generation: int, error: BaseException) -> None:
         async with self.lock:

@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 
 from charlotte.app import create_bot, required_intents
@@ -26,4 +28,18 @@ async def test_startup_discovers_and_loads_the_approved_extensions(app_config) -
     }
     assert bot.providers.names == frozenset({"youtube", "soundcloud", "upload"})
     assert len(bot.extension_manager.statuses()) == 5
+    await bot.close()
+
+
+@pytest.mark.asyncio
+async def test_ready_retries_transient_owner_lookup_failure(app_config) -> None:
+    bot = create_bot(app_config)
+    bot.reporter.resolve_owner = AsyncMock(side_effect=[False, True])
+    bot.health_writer.start = lambda: None
+    bot.change_presence = AsyncMock()
+    await bot.on_ready()
+    assert not bot._owner_resolved
+    await bot.on_ready()
+    assert bot._owner_resolved
+    assert bot.reporter.resolve_owner.await_count == 2
     await bot.close()

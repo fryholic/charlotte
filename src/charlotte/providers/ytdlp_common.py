@@ -3,71 +3,125 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import signal
+import sys
 from collections.abc import Callable
 from typing import Any
 
 import discord
-import yt_dlp
 
 from charlotte.constants import YTDLP_SOCKET_TIMEOUT
 from charlotte.music.models import PreparedAudio
 
 
-class QuietYtdlpLogger:
-    def debug(self, message: str) -> None:
-        pass
-
-    def info(self, message: str) -> None:
-        pass
-
-    def warning(self, message: str) -> None:
-        pass
-
-    def error(self, message: str) -> None:
-        pass
-
-
 async def run_blocking[T](
-    operation: Callable[[], T], *, cleanup_cancelled_result: Callable[[T], None] | None = None
+    operation: Callable[[], T],
+    *,
+    cleanup_cancelled_result: Callable[[T], None] | None = None,
+    wait_for_cleanup_on_cancel: bool = False,
 ) -> T:
-    """Keep registry inflight accounting true until a worker thread really stops."""
+    """Run short blocking work without making cancellation wait for the worker."""
 
     task = asyncio.create_task(asyncio.to_thread(operation))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError as cancellation:
-        try:
-            result = await task
-        except Exception:
-            raise cancellation from None
-        try:
-            if cleanup_cancelled_result is not None:
-                cleanup_cancelled_result(result)
-        finally:
-            raise cancellation
+        if wait_for_cleanup_on_cancel:
+            try:
+                result = await task
+            except Exception:
+                raise cancellation from None
+            try:
+                if cleanup_cancelled_result is not None:
+                    cleanup_cancelled_result(result)
+            finally:
+                raise cancellation
+        task.add_done_callback(
+            lambda completed: _cleanup_detached_result(completed, cleanup_cancelled_result)
+        )
+        raise
 
 
-def extract(url: str, *, playlist: bool) -> dict[str, Any]:
-    options: dict[str, Any] = {
-        "cachedir": False,
-        "extract_flat": False,
-        "format": "bestaudio/best",
-        "logger": QuietYtdlpLogger(),
-        "js_runtimes": {"node": {}},
-        "noplaylist": not playlist,
-        "playlistend": 1,
-        "playlist_items": "1",
-        "quiet": True,
-        "skip_download": True,
-        "socket_timeout": YTDLP_SOCKET_TIMEOUT,
-        "no_warnings": True,
-    }
-    with yt_dlp.YoutubeDL(options) as client:
-        result = client.extract_info(url, download=False)
+def _cleanup_detached_result[T](
+    task: asyncio.Task[T], cleanup_cancelled_result: Callable[[T], None] | None
+) -> None:
+    try:
+        result = task.result()
+    except BaseException:
+        return
+    if cleanup_cancelled_result is None:
+        return
+    try:
+        cleanup_cancelled_result(result)
+    except BaseException:
+        return
+
+
+class YtdlpError(RuntimeError):
+    pass
+
+
+async def extract(url: str, *, playlist: bool) -> dict[str, Any]:
+    """Run yt-dlp behind a subprocess boundary that cancellation can terminate."""
+
+    command = [
+        sys.executable,
+        "-m",
+        "yt_dlp",
+        "--dump-single-json",
+        "--no-warnings",
+        "--no-cache-dir",
+        "--skip-download",
+        "--format",
+        "bestaudio/best",
+        "--socket-timeout",
+        str(YTDLP_SOCKET_TIMEOUT),
+        "--js-runtimes",
+        "node",
+    ]
+    if playlist:
+        command.extend(("--playlist-items", "1"))
+    else:
+        command.append("--no-playlist")
+    command.append(url)
+
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = await process.communicate()
+    except asyncio.CancelledError:
+        await asyncio.shield(_kill_process(process))
+        raise
+    if process.returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip().rsplit("\n", 1)[-1]
+        raise YtdlpError(detail or f"yt-dlp exited with status {process.returncode}")
+    try:
+        result = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise YtdlpError("yt-dlp returned invalid metadata") from exc
     if not isinstance(result, dict):
-        raise yt_dlp.utils.DownloadError("Extractor returned no metadata")
+        raise YtdlpError("yt-dlp returned no metadata")
     return result
+
+
+async def _kill_process(process: asyncio.subprocess.Process) -> None:
+    if process.returncode is not None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except ProcessLookupError:
+        pass
+    await process.wait()
 
 
 def first_entry(data: dict[str, Any]) -> dict[str, Any] | None:
@@ -107,5 +161,9 @@ async def stream_audio(url: str, *, start_at: float = 0) -> PreparedAudio:
         finally:
             stderr_sink.close()
 
-    source, stderr_sink = await run_blocking(create, cleanup_cancelled_result=cleanup_cancelled)
+    source, stderr_sink = await run_blocking(
+        create,
+        cleanup_cancelled_result=cleanup_cancelled,
+        wait_for_cleanup_on_cancel=True,
+    )
     return PreparedAudio(source=source, seekable=True, owned_resources=(stderr_sink,))

@@ -5,11 +5,9 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import ParseResult, parse_qs, urlencode, urlunparse
 
-import yt_dlp
-
 from charlotte.errors import SourceUnavailableError, UnsupportedContentError, UserInputError
 from charlotte.music.models import PreparedAudio, RequestContext, Track
-from charlotte.providers.ytdlp_common import extract, first_entry, run_blocking, stream_audio
+from charlotte.providers.ytdlp_common import YtdlpError, extract, first_entry, stream_audio
 
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 
@@ -26,8 +24,8 @@ class YouTubeProvider:
     ) -> Track:
         normalized, playlist = _normalize(parsed_url)
         try:
-            data = await run_blocking(lambda: extract(normalized, playlist=playlist))
-        except yt_dlp.utils.DownloadError as exc:
+            data = await extract(normalized, playlist=playlist)
+        except YtdlpError as exc:
             message_id = "music.youtube.empty_playlist" if playlist else "music.youtube.unavailable"
             raise SourceUnavailableError(message_id, str(exc)) from exc
         info = first_entry(data)
@@ -58,8 +56,8 @@ class YouTubeProvider:
     async def prepare(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
         source_url = str(track.provider_data["source_url"])
         try:
-            data = await run_blocking(lambda: extract(source_url, playlist=False))
-        except yt_dlp.utils.DownloadError as exc:
+            data = await extract(source_url, playlist=False)
+        except YtdlpError as exc:
             raise SourceUnavailableError("music.youtube.unavailable", str(exc)) from exc
         info = first_entry(data)
         if info is None:

@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from charlotte.music.models import PreparedAudio
 from charlotte.music.player import GuildPlayer
 from charlotte.music.provider import ProviderRegistry
 from tests.fakes import (
@@ -11,10 +12,52 @@ from tests.fakes import (
     FakeGuild,
     FakeProvider,
     FakeReporter,
+    FakeSource,
     FakeTextChannel,
     FakeVoiceChannel,
     make_track,
 )
+
+
+class TrackingSource(FakeSource):
+    def __init__(self, provider) -> None:
+        super().__init__()
+        self.provider = provider
+
+    def cleanup(self) -> None:
+        if self.cleaned:
+            return
+        super().cleanup()
+        self.provider.live_sources -= 1
+
+
+class GatedPrefetchProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_calls = 0
+        self.prefetch_created = asyncio.Event()
+        self.release_prefetch = asyncio.Event()
+        self.live_sources = 0
+        self.max_live_sources = 0
+
+    def _source(self):
+        source = TrackingSource(self)
+        self.sources.append(source)
+        self.live_sources += 1
+        self.max_live_sources = max(self.max_live_sources, self.live_sources)
+        return source
+
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+        source = self._source()
+        if track.title == "next" and self.prepare_calls == 2:
+            self.prefetch_created.set()
+            try:
+                await self.release_prefetch.wait()
+            except asyncio.CancelledError:
+                source.cleanup()
+                raise
+        return PreparedAudio(source=source, seekable=True)
 
 
 def build_player(app_config, guild_id=1, *, provider_delay=0):
@@ -143,4 +186,62 @@ async def test_cancelled_initial_prepare_releases_current_track(app_config) -> N
         await operation
     assert player.current is None
     assert track.state.value == "disposed"
+    await player.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["finish", "skip"])
+async def test_slow_prefetch_never_creates_a_third_source(app_config, transition) -> None:
+    player, channel, _, reporter = build_player(app_config)
+    provider = GatedPrefetchProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    await player.add(make_track("next"))
+    await asyncio.wait_for(provider.prefetch_created.wait(), 1)
+    await player.add(make_track("after-next"))
+
+    if transition == "finish":
+        channel.guild.voice_client.finish()
+        operation = None
+    else:
+        operation = asyncio.create_task(player.skip())
+    await asyncio.sleep(0.02)
+    assert provider.prepare_calls == 2
+    assert provider.max_live_sources <= 2
+
+    provider.release_prefetch.set()
+    if operation is not None:
+        await asyncio.wait_for(operation, 1)
+    for _ in range(100):
+        if player.current is not None and player.current.title == "next":
+            break
+        await asyncio.sleep(0.01)
+    assert player.current is not None and player.current.title == "next"
+    assert provider.max_live_sources <= 2
+    assert reporter.reports == []
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_empty_channel_event_cannot_disconnect_remote_move(app_config) -> None:
+    player, old_channel, _, _ = build_player(app_config)
+    new_channel = FakeVoiceChannel(old_channel.guild, 99, "new-channel")
+    await player.connect(old_channel)
+    await player.add(make_track("old"))
+    await player.stop()
+
+    await player._connection_lock.acquire()
+    move = asyncio.create_task(player.connect(new_channel))
+    await asyncio.sleep(0)
+    stale_leave = asyncio.create_task(player.leave_if_empty(old_channel))
+    await asyncio.sleep(0)
+    player._connection_lock.release()
+    await asyncio.wait_for(move, 1)
+    await player.add(make_track("new"))
+    assert not await asyncio.wait_for(stale_leave, 1)
+    assert player.bot_channel is new_channel
+    assert player.current is not None and player.current.title == "new"
     await player.close()

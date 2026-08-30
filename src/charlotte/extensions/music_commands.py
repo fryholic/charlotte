@@ -337,7 +337,7 @@ class MusicCommandsCog(commands.Cog):
             return
         channel = player.bot_channel
         if channel is not None and not any(not item.bot for item in channel.members):
-            await player.leave()
+            await player.leave_if_empty(channel)
 
     async def _control_allowed(self, ctx: commands.Context, player) -> bool:
         decision = decide_control(ctx.author, player.bot_channel, self.bot.config.operator_user_ids)

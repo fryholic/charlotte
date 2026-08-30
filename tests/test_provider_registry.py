@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from urllib.parse import urlparse
 
 import pytest
@@ -90,24 +91,23 @@ class BlockingProvider(FakeProvider):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_worker_stays_inflight_until_thread_really_stops() -> None:
+async def test_provider_timeout_releases_command_and_capacity_before_thread_stops() -> None:
     started = threading.Event()
     release = threading.Event()
     provider = BlockingProvider(started, release)
-    registry = ProviderRegistry()
+    registry = ProviderRegistry(operation_timeout=0.05)
     registry.register(provider)
     request = RequestContext(1, 2, 3, "requester")
     track = await provider.inspect_url(
         request, urlparse("https://example.com/a"), "https://example.com/a"
     )
+    started_at = time.monotonic()
     operation = asyncio.create_task(registry.prepare(track))
     await asyncio.to_thread(started.wait, 1)
-    operation.cancel()
-    await asyncio.sleep(0)
-    assert registry.inflight("fake") == 1
-    with pytest.raises(ExtensionOperationError, match="inflight"):
-        registry.begin_unload("fake")
-    release.set()
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(ProviderError, match="timed out"):
         await operation
+    assert time.monotonic() - started_at < 0.2
     assert registry.inflight("fake") == 0
+    registry.begin_unload("fake")
+    registry.cancel_unload("fake")
+    release.set()
