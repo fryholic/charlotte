@@ -103,13 +103,25 @@ class MusicCommandsCog(commands.Cog):
                     raise UserInputError(_access_message_id(decision.reason))
                 target_channel = ctx.author.voice.channel
                 _check_voice_permissions(ctx.guild.me, target_channel)
-                remote_move = (
-                    player.bot_channel is not None and player.bot_channel != target_channel
-                )
-                if remote_move:
-                    removed_count = (await player.stop()).removed_count
-                moved = await player.connect(target_channel)
-                result = await player.add(track)
+                try:
+                    committed = await player.commit_play(
+                        track,
+                        target_channel,
+                        access_check=self._play_guard(ctx, target_channel),
+                    )
+                except AccessDeniedError:
+                    current = decide_play(
+                        ctx.author,
+                        player.bot_channel,
+                        self.bot.config.operator_user_ids,
+                    )
+                    if current.reason is AccessReason.USER_NOT_IN_VOICE and current.privileged:
+                        raise UserInputError("access.admin_play_requires_voice") from None
+                    raise UserInputError(_access_message_id(current.reason)) from None
+                remote_move = committed.remote_move
+                removed_count = committed.removed_count
+                moved = committed.moved
+                result = committed.add_result
                 owned_by_player = True
             finally:
                 await player.finish_receipt(receipt)
@@ -375,6 +387,16 @@ class MusicCommandsCog(commands.Cog):
             decide_control(
                 ctx.author,
                 channel,
+                self.bot.config.operator_user_ids,
+            ).allowed
+        )
+
+    def _play_guard(self, ctx: commands.Context, target_channel):
+        return lambda bot_channel: (
+            getattr(getattr(ctx.author, "voice", None), "channel", None) == target_channel
+            and decide_play(
+                ctx.author,
+                bot_channel,
                 self.bot.config.operator_user_ids,
             ).allowed
         )

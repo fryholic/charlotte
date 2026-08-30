@@ -441,6 +441,146 @@ async def test_detached_constructor_does_not_block_another_guild(app_config) -> 
 
 
 @pytest.mark.asyncio
+async def test_recovery_cancels_initial_prepare_without_third_source(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = DetachedCurrentProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    first = make_track("first")
+    first_add = asyncio.create_task(player.add(first))
+    assert await asyncio.to_thread(provider.current_started.wait, 1)
+    await player.add(make_track("second"))
+    await player.add(make_track("third"))
+    await asyncio.sleep(0.02)
+
+    disconnected = player.voice_client
+    assert disconnected is not None
+    disconnected.connected = False
+    channel.guild.voice_client = None
+    recovery = asyncio.create_task(player.recover_voice(channel, expected_track_id=first.id))
+    await asyncio.sleep(0.02)
+    provider.release_current.set()
+
+    await asyncio.wait_for(recovery, 1)
+    with pytest.raises(asyncio.CancelledError):
+        await first_add
+    assert player.current is first
+    assert provider.max_live_sources <= 2
+    assert provider.sources[1].cleaned
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_consecutive_skip_owns_promoted_prefetch(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = SlowCancelPrefetchProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    await player.add(make_track("next"))
+    await player.add(make_track("third"))
+    await player.add(make_track("fourth"))
+    await asyncio.wait_for(provider.prefetch_created.wait(), 1)
+
+    first_skip = asyncio.create_task(player.skip())
+    await asyncio.sleep(0.02)
+    second_skip = asyncio.create_task(player.skip())
+    await asyncio.wait_for(provider.cancel_started.wait(), 1)
+    provider.release_cancel.set()
+
+    await asyncio.wait_for(first_skip, 1)
+    await asyncio.wait_for(second_skip, 1)
+    await asyncio.sleep(0.02)
+    assert player.current is not None and player.current.title == "third"
+    assert provider.max_live_sources <= 2
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_commit_play_rechecks_access_after_connect(app_config) -> None:
+    bot = FakeBot()
+    guild = FakeGuild(1)
+    channel = DelayedReconnectChannel(guild, 10, "voice")
+    text = FakeTextChannel(500)
+    bot.guilds[guild.id] = guild
+    bot.channels[text.id] = text
+    provider = FakeProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player = GuildPlayer(
+        guild.id,
+        bot=bot,
+        config=app_config,
+        providers=providers,
+        reporter=FakeReporter(),
+    )
+    channel.delay_reconnect = True
+    allowed = True
+    committing = asyncio.create_task(
+        player.commit_play(
+            make_track("stale"),
+            channel,
+            access_check=lambda _: allowed,
+        )
+    )
+    await asyncio.wait_for(channel.reconnect_started.wait(), 1)
+    allowed = False
+    channel.release_reconnect.set()
+
+    with pytest.raises(AccessDeniedError):
+        await asyncio.wait_for(committing, 1)
+    assert player.current is None
+    assert player.bot_channel is None
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_close_drains_detached_constructor_cleanup(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = DetachedCurrentProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    first_add = asyncio.create_task(player.add(make_track("first")))
+    assert await asyncio.to_thread(provider.current_started.wait, 1)
+    closing = asyncio.create_task(player.close())
+    await asyncio.sleep(0.02)
+    assert not closing.done()
+    provider.release_current.set()
+
+    await asyncio.wait_for(closing, 1)
+    with pytest.raises(asyncio.CancelledError):
+        await first_add
+    assert provider.live_sources == 0
+    assert provider.sources[0].cleaned
+
+
+@pytest.mark.asyncio
+async def test_async_failure_notification_escapes_and_truncates_title(app_config) -> None:
+    player, _, _, _ = build_player(app_config)
+    track = make_track("**" + "x" * 3000)
+    text_channel = next(iter(player.bot.channels.values()))
+    track.request_channel_id = text_channel.id
+    async with player.lock:
+        player.current = track
+        player._generation += 1
+        generation = player._generation
+    await player._fail_current(track, generation, RuntimeError("failed"))
+
+    content = text_channel.messages[0][0]
+    assert len(content) < 1900
+    assert "\\*\\*" in content
+    await player.close()
+
+
+@pytest.mark.asyncio
 async def test_recovery_serializes_with_remote_move_and_play(app_config) -> None:
     bot = FakeBot()
     guild = FakeGuild(1)

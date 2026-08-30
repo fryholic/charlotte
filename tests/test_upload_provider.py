@@ -5,8 +5,9 @@ import wave
 
 import pytest
 
-from charlotte.errors import UserInputError
+from charlotte.errors import SourceUnavailableError, UserInputError
 from charlotte.music.models import RequestContext
+from charlotte.providers import upload as upload_module
 from charlotte.providers.upload import UploadProvider
 
 
@@ -18,6 +19,11 @@ class Attachment:
 
     async def read(self) -> bytes:
         return self.data
+
+
+class FailingAttachment(Attachment):
+    async def read(self) -> bytes:
+        raise RuntimeError("network failed")
 
 
 def wav_bytes() -> bytes:
@@ -55,6 +61,26 @@ async def test_invalid_bytes_are_rejected_without_a_temporary_file() -> None:
         await provider.inspect_upload(
             RequestContext(1, 2, 3, "requester"), Attachment(b"not audio")
         )
+    assert caught.value.message_id == "music.play.invalid_attachment"
+
+
+@pytest.mark.asyncio
+async def test_attachment_transport_failure_is_reportable() -> None:
+    provider = UploadProvider()
+    with pytest.raises(SourceUnavailableError) as caught:
+        await provider.inspect_upload(RequestContext(1, 2, 3, "requester"), FailingAttachment(b""))
+    assert caught.value.message_id == "music.play.attachment_read_failed"
+
+
+@pytest.mark.asyncio
+async def test_probe_infrastructure_failure_is_reportable(monkeypatch) -> None:
+    async def fail_probe(raw):
+        raise RuntimeError("ffprobe unavailable")
+
+    monkeypatch.setattr(upload_module, "_probe", fail_probe)
+    provider = UploadProvider()
+    with pytest.raises(SourceUnavailableError) as caught:
+        await provider.inspect_upload(RequestContext(1, 2, 3, "requester"), Attachment(wav_bytes()))
     assert caught.value.message_id == "music.play.invalid_attachment"
 
 

@@ -31,11 +31,38 @@ def test_redacts_gateway_session_and_verification_keys_in_mapping_text() -> None
     assert "header-secret" not in value
 
 
+def test_redacts_sensitive_mapping_values_and_nested_formatter_fields() -> None:
+    secrets = {
+        "cookie": "session-secret",
+        "Authorization": "Bearer header-secret",
+        "verify-key": "verify-secret",
+        "database_password": "pw",
+        "nested": [{"access_token": "nested-token"}],
+    }
+    redacted = redact(secrets)
+    rendered = json.dumps(redacted)
+    for secret in ("session-secret", "header-secret", "verify-secret", "pw", "nested-token"):
+        assert secret not in rendered
+
+    record = logging.LogRecord("charlotte.test", logging.ERROR, __file__, 1, "failed", (), None)
+    record.context = secrets
+    payload = JsonFormatter().format(record)
+    for secret in ("session-secret", "header-secret", "verify-secret", "pw", "nested-token"):
+        assert secret not in payload
+
+
 def test_redacts_direct_media_url_path_and_query() -> None:
     value = redact_url("https://media.example.net/private/path?expire=1&n=challenge")
     assert "private/path" not in value
     assert "challenge" not in value
     assert "media.example.net" in value
+
+
+def test_soundcloud_lookalike_host_is_not_treated_as_public() -> None:
+    value = redact_url("https://evil-soundcloud.com/private/token-path?expires=1&n=challenge")
+    assert "private/token-path" not in value
+    assert "challenge" not in value
+    assert "evil-soundcloud.com" in value
 
 
 def test_json_formatter_redacts_registered_token_without_assignment_context() -> None:

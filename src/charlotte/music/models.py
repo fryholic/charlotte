@@ -100,6 +100,14 @@ class AddResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PlayCommitResult:
+    add_result: AddResult
+    moved: bool
+    remote_move: bool
+    removed_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class SkipResult:
     skipped_title: str | None
     next_title: str | None

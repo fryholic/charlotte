@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sys
 
@@ -47,6 +48,8 @@ class CharlotteBot(commands.Bot):
         self.extension_manager = ExtensionManager(self)
         self.health_writer = HealthWriter(self)
         self._owner_resolved = False
+        self._owner_resolution_task: asyncio.Task[None] | None = None
+        self._owner_retry_delays = (1.0, 2.0, 4.0)
         self._closing = False
         self.log = logging.getLogger("charlotte.app")
 
@@ -70,6 +73,8 @@ class CharlotteBot(commands.Bot):
     async def on_ready(self) -> None:
         if not self._owner_resolved:
             self._owner_resolved = await self.reporter.resolve_owner(self)
+            if not self._owner_resolved:
+                self._start_owner_resolution_retry()
         self.health_writer.start()
         await self.change_presence(
             activity=discord.Activity(
@@ -85,6 +90,28 @@ class CharlotteBot(commands.Bot):
                 "environment": self.config.environment.value,
             },
         )
+
+    def _start_owner_resolution_retry(self) -> None:
+        task = self._owner_resolution_task
+        if task is None or task.done():
+            self._owner_resolution_task = asyncio.create_task(self._retry_owner_resolution())
+
+    async def _retry_owner_resolution(self) -> None:
+        for delay in self._owner_retry_delays:
+            await asyncio.sleep(delay)
+            if self._closing or self._owner_resolved:
+                return
+            if await self.reporter.resolve_owner(self):
+                self._owner_resolved = True
+                return
+
+    async def _stop_owner_resolution(self) -> None:
+        task = self._owner_resolution_task
+        self._owner_resolution_task = None
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         await self.players.remove(guild.id)
@@ -161,6 +188,7 @@ class CharlotteBot(commands.Bot):
         self.log.info("Charlotte stopping", extra={"event": "app.stopping"})
         cleanup_steps = (
             ("health", self.health_writer.stop),
+            ("owner-resolution", self._stop_owner_resolution),
             ("players", self.players.close),
             ("discord", super().close),
         )

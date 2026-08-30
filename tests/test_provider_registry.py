@@ -9,7 +9,7 @@ import pytest
 
 from charlotte.errors import ExtensionOperationError, ProviderError
 from charlotte.music.models import RequestContext
-from charlotte.music.provider import ProviderRegistry
+from charlotte.music.provider import ProviderRegistry, observe_detached_work
 from charlotte.providers.ytdlp_common import run_blocking
 from tests.fakes import FakeProvider
 
@@ -137,3 +137,43 @@ async def test_cancelled_source_constructor_returns_before_late_cleanup() -> Non
     assert time.monotonic() - started_at < 0.1
     release.set()
     await asyncio.wait_for(cleaned.wait(), 1)
+
+
+@pytest.mark.asyncio
+async def test_detached_cleanup_does_not_block_the_event_loop() -> None:
+    constructor_started = threading.Event()
+    release_constructor = threading.Event()
+    cleanup_started = threading.Event()
+    release_cleanup = threading.Event()
+    completions = []
+
+    def construct():
+        constructor_started.set()
+        release_constructor.wait(timeout=2)
+        return object()
+
+    def cleanup(result):
+        cleanup_started.set()
+        release_cleanup.wait(timeout=2)
+
+    with observe_detached_work(completions.append):
+        operation = asyncio.create_task(run_blocking(construct, cleanup_cancelled_result=cleanup))
+        assert await asyncio.to_thread(constructor_started.wait, 1)
+        operation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await operation
+
+    release_constructor.set()
+    assert await asyncio.to_thread(cleanup_started.wait, 1)
+    ticked = False
+
+    async def ticker():
+        nonlocal ticked
+        await asyncio.sleep(0)
+        ticked = True
+
+    await asyncio.wait_for(ticker(), 0.1)
+    assert ticked
+    assert completions and not completions[0].done()
+    release_cleanup.set()
+    await asyncio.wait_for(completions[0], 1)

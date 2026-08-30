@@ -16,6 +16,8 @@ from charlotte.constants import YTDLP_SOCKET_TIMEOUT
 from charlotte.music.models import PreparedAudio
 from charlotte.music.provider import register_detached_work
 
+_DETACHED_CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+
 
 async def run_blocking[T](
     operation: Callable[[], T],
@@ -31,18 +33,24 @@ async def run_blocking[T](
         completion = asyncio.get_running_loop().create_future()
 
         def cleanup(completed: asyncio.Task[T]) -> None:
-            try:
+            cleanup_task = asyncio.create_task(
                 _cleanup_detached_result(completed, cleanup_cancelled_result)
-            finally:
+            )
+            _DETACHED_CLEANUP_TASKS.add(cleanup_task)
+
+            def finished(finished_task: asyncio.Task[None]) -> None:
+                _DETACHED_CLEANUP_TASKS.discard(finished_task)
                 if not completion.done():
                     completion.set_result(None)
+
+            cleanup_task.add_done_callback(finished)
 
         task.add_done_callback(cleanup)
         register_detached_work(completion)
         raise
 
 
-def _cleanup_detached_result[T](
+async def _cleanup_detached_result[T](
     task: asyncio.Task[T], cleanup_cancelled_result: Callable[[T], None] | None
 ) -> None:
     try:
@@ -52,7 +60,7 @@ def _cleanup_detached_result[T](
     if cleanup_cancelled_result is None:
         return
     try:
-        cleanup_cancelled_result(result)
+        await asyncio.to_thread(cleanup_cancelled_result, result)
     except BaseException:
         return
 

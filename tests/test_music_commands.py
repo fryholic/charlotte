@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from charlotte.extensions.music_commands import MusicCommandsCog
-from charlotte.music.models import AddResult, RequestContext, Track
+from charlotte.music.models import AddResult, PlayCommitResult, RequestContext, Track
 from tests.fakes import FakeReporter
 
 
@@ -89,18 +89,18 @@ class CommandPlayer:
     async def cancel_receipt(self, receipt):
         self.cancelled = True
 
-    async def stop(self):
-        self.stopped = True
-        return SimpleNamespace(removed_count=2)
-
-    async def connect(self, channel):
+    async def commit_play(self, track, channel, *, access_check):
+        assert access_check(self.bot_channel)
+        self.stopped = self.bot_channel is not None and self.bot_channel != channel
         self.connected_to = channel
         self.bot_channel = channel
-        return True
-
-    async def add(self, track):
         self.added = track
-        return AddResult(started=True, queued_position=None)
+        return PlayCommitResult(
+            add_result=AddResult(started=True, queued_position=None),
+            moved=True,
+            remote_move=self.stopped,
+            removed_count=2 if self.stopped else 0,
+        )
 
 
 def bot_for(player):

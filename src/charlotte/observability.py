@@ -39,6 +39,18 @@ _SENSITIVE_QUERY_KEYS = {
     "signature",
     "token",
 }
+_SENSITIVE_MAPPING_KEYS = {
+    "authorization",
+    "cookie",
+    "key",
+    "password",
+    "secret",
+    "session_id",
+    "sig",
+    "signature",
+    "token",
+    "verify_key",
+}
 _PUBLIC_URL_HOSTS = {
     "discord.com",
     "m.soundcloud.com",
@@ -76,7 +88,8 @@ def redact_url(value: str) -> str:
         return "[redacted-url]"
     netloc = f"{hostname}{port}"
     path = parsed.path
-    if hostname.lower().endswith("soundcloud.com"):
+    lowered_hostname = hostname.lower()
+    if lowered_hostname == "soundcloud.com" or lowered_hostname.endswith(".soundcloud.com"):
         path = "/".join(
             "[redacted-secret]" if segment.startswith("s-") else segment
             for segment in path.split("/")
@@ -99,7 +112,12 @@ def redact(value: object, *, secrets: tuple[str, ...] = ()) -> object:
         scrubbed = _SECRET_HEADER.sub(lambda match: f"{match.group(1)}: [redacted]", scrubbed)
         return scrubbed
     if isinstance(value, dict):
-        return {str(key): redact(item, secrets=secrets) for key, item in value.items()}
+        return {
+            str(key): (
+                "[redacted]" if _is_sensitive_mapping_key(key) else redact(item, secrets=secrets)
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, (list, tuple, set, frozenset)):
         return [redact(item, secrets=secrets) for item in value]
     if value is None or isinstance(value, (bool, int, float)):
@@ -109,6 +127,13 @@ def redact(value: object, *, secrets: tuple[str, ...] = ()) -> object:
     except Exception:
         rendered = f"<{type(value).__name__}: unprintable>"
     return redact(rendered, secrets=secrets)
+
+
+def _is_sensitive_mapping_key(key: object) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", str(key).lower()).strip("_")
+    return normalized in _SENSITIVE_MAPPING_KEYS or normalized.endswith(
+        ("_authorization", "_cookie", "_password", "_secret", "_signature", "_token")
+    )
 
 
 class JsonFormatter(logging.Formatter):

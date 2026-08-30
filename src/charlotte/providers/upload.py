@@ -13,9 +13,13 @@ import discord
 from mutagen import File as MutagenFile
 
 from charlotte.constants import ATTACHMENT_READ_TIMEOUT
-from charlotte.errors import PlaybackError, UserInputError
+from charlotte.errors import PlaybackError, SourceUnavailableError, UserInputError
 from charlotte.music.models import PreparedAudio, RequestContext, Track
 from charlotte.providers.ytdlp_common import run_blocking
+
+
+class _InvalidAudio(ValueError):
+    pass
 
 
 class _PipeBufferOwner:
@@ -53,16 +57,18 @@ class UploadProvider:
             async with asyncio.timeout(ATTACHMENT_READ_TIMEOUT):
                 raw = await attachment.read()
         except TimeoutError as exc:
-            raise UserInputError("music.play.attachment_read_failed") from exc
+            raise SourceUnavailableError("music.play.attachment_read_failed", str(exc)) from exc
         except Exception as exc:
-            raise UserInputError("music.play.attachment_read_failed") from exc
+            raise SourceUnavailableError("music.play.attachment_read_failed", str(exc)) from exc
         if not isinstance(raw, bytes) or not raw:
             raise UserInputError("music.play.invalid_attachment")
 
         try:
             probe = await _probe(raw)
-        except Exception as exc:
+        except _InvalidAudio as exc:
             raise UserInputError("music.play.invalid_attachment") from exc
+        except Exception as exc:
+            raise SourceUnavailableError("music.play.invalid_attachment", str(exc)) from exc
         title = await run_blocking(lambda: _metadata_title(raw))
         if not title:
             tags = probe.get("format", {}).get("tags", {})
@@ -154,15 +160,15 @@ async def _probe(raw: bytes) -> dict[str, Any]:
         await process.wait()
         raise
     if process.returncode != 0:
-        raise ValueError("ffprobe rejected attachment bytes")
+        raise _InvalidAudio("ffprobe rejected attachment bytes")
     parsed = json.loads(stdout.decode("utf-8", errors="replace"))
     if not isinstance(parsed, dict) or not isinstance(parsed.get("format"), dict):
-        raise ValueError("ffprobe returned no audio format")
+        raise _InvalidAudio("ffprobe returned no audio format")
     streams = parsed.get("streams")
     if not isinstance(streams, list) or not any(
         isinstance(stream, dict) and stream.get("codec_type") == "audio" for stream in streams
     ):
-        raise ValueError("ffprobe found no audio stream")
+        raise _InvalidAudio("ffprobe found no audio stream")
     return parsed
 
 

@@ -35,11 +35,12 @@ async def test_startup_discovers_and_loads_the_approved_extensions(app_config) -
 async def test_ready_retries_transient_owner_lookup_failure(app_config) -> None:
     bot = create_bot(app_config)
     bot.reporter.resolve_owner = AsyncMock(side_effect=[False, True])
+    bot._owner_retry_delays = (0,)
     bot.health_writer.start = lambda: None
     bot.change_presence = AsyncMock()
     await bot.on_ready()
-    assert not bot._owner_resolved
-    await bot.on_ready()
+    assert bot._owner_resolution_task is not None
+    await bot._owner_resolution_task
     assert bot._owner_resolved
     assert bot.reporter.resolve_owner.await_count == 2
     await bot.close()
