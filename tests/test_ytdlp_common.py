@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 
 import pytest
 
@@ -12,6 +13,20 @@ class SuccessfulProcess:
 
     async def communicate(self):
         return b'{"id":"public"}', b""
+
+
+class StuckProcess:
+    def __init__(self) -> None:
+        self.killed = False
+
+    def poll(self):
+        return None
+
+    def kill(self) -> None:
+        self.killed = True
+
+    def wait(self, *, timeout):
+        raise subprocess.TimeoutExpired("ffmpeg", timeout)
 
 
 @pytest.mark.asyncio
@@ -31,3 +46,15 @@ async def test_extract_ignores_host_ytdlp_configuration(monkeypatch) -> None:
     assert captured.index("--ignore-config") < captured.index(
         "https://www.youtube.com/watch?v=public"
     )
+
+
+def test_ffmpeg_cleanup_has_a_hard_process_wait_deadline() -> None:
+    source = object.__new__(ytdlp_common.BoundedFFmpegOpusAudio)
+    process = StuckProcess()
+    source._process = process
+
+    with pytest.raises(RuntimeError, match="cleanup deadline"):
+        source._kill_process()
+
+    assert process.killed
+    source._process = None

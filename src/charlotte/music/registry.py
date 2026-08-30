@@ -8,6 +8,7 @@ import logging
 import discord
 
 from charlotte.config import AppConfig
+from charlotte.errors import PlaybackError
 from charlotte.music.player import GuildPlayer
 from charlotte.music.provider import ProviderRegistry
 from charlotte.observability import ErrorReporter, log_exception
@@ -28,13 +29,18 @@ class PlayerRegistry:
         self.reporter = reporter
         self._players: dict[int, GuildPlayer] = {}
         self._lock = asyncio.Lock()
+        self._closed = False
         self.log = logging.getLogger("charlotte.players")
 
     async def get(self, guild_id: int) -> GuildPlayer:
+        if self._closed:
+            raise PlaybackError("Player registry is closed")
         player = self._players.get(guild_id)
         if player is not None:
             return player
         async with self._lock:
+            if self._closed:
+                raise PlaybackError("Player registry is closed")
             player = self._players.get(guild_id)
             if player is None:
                 player = GuildPlayer(
@@ -61,6 +67,9 @@ class PlayerRegistry:
 
     async def close(self) -> None:
         async with self._lock:
+            if self._closed:
+                return
+            self._closed = True
             players = list(self._players.values())
             self._players.clear()
         results = await asyncio.gather(

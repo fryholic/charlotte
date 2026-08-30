@@ -31,6 +31,18 @@ def test_redacts_gateway_session_and_verification_keys_in_mapping_text() -> None
     assert "header-secret" not in value
 
 
+def test_redacts_unquoted_colon_delimited_secret_suffixes() -> None:
+    raw = "token: top-secret api_key: api-secret client_secret: client-secret"
+    value = redact(raw)
+    for secret in ("top-secret", "api-secret", "client-secret"):
+        assert secret not in value
+
+    record = logging.LogRecord("charlotte.test", logging.ERROR, __file__, 1, raw, (), None)
+    payload = JsonFormatter().format(record)
+    for secret in ("top-secret", "api-secret", "client-secret"):
+        assert secret not in payload
+
+
 def test_redacts_sensitive_mapping_values_and_nested_formatter_fields() -> None:
     secrets = {
         "cookie": "session-secret",
@@ -157,3 +169,16 @@ def test_owner_dm_redacts_raw_configured_token(app_config) -> None:
     )
     assert "test-token" not in body
     assert body.count("[redacted]") >= 2
+
+
+def test_owner_dm_redacts_unquoted_colon_delimited_secrets(app_config) -> None:
+    reporter = ErrorReporter(app_config)
+    body = reporter._render_dm(
+        "fixed-error-id",
+        "test.secret",
+        RuntimeError("token: top-secret"),
+        "api_key: api-secret\nclient_secret: client-secret",
+        ErrorContext(),
+    )
+    for secret in ("top-secret", "api-secret", "client-secret"):
+        assert secret not in body

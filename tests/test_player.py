@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from charlotte.errors import AccessDeniedError, ProviderError
+from charlotte.errors import AccessDeniedError, ProviderError, QueueLimitError, ResourceCleanupError
 from charlotte.music.models import PreparedAudio
 from charlotte.music.player import GuildPlayer
 from charlotte.music.provider import ProviderRegistry
@@ -178,6 +179,43 @@ class TrackingProvider(GatedPrefetchProvider):
     async def prepare(self, track, *, start_at=0):
         self.prepare_calls += 1
         return PreparedAudio(source=self._source(), seekable=True)
+
+
+class RecordingReconnectProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_offsets: list[float] = []
+
+    async def prepare(self, track, *, start_at=0):
+        self.start_offsets.append(start_at)
+        return await super().prepare(track, start_at=start_at)
+
+
+class PrefetchFailureProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls_by_title: dict[str, int] = {}
+
+    async def prepare(self, track, *, start_at=0):
+        self.calls_by_title[track.title] = self.calls_by_title.get(track.title, 0) + 1
+        if track.title == "next":
+            raise RuntimeError("prepare failed")
+        return await super().prepare(track, start_at=start_at)
+
+
+class FailingCleanupSource(FakeSource):
+    def cleanup(self) -> None:
+        raise RuntimeError("cleanup failed")
+
+
+class FailingPreparedCleanupProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_calls = 0
+
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+        return PreparedAudio(source=FailingCleanupSource(), seekable=True)
 
 
 class DelayedReconnectChannel(FakeVoiceChannel):
@@ -519,6 +557,61 @@ async def test_recovery_cancels_initial_prepare_without_third_source(app_config)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("paused", [False, True])
+async def test_voice_recovery_restores_the_previous_pause_state(app_config, paused) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = RecordingReconnectProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    current = make_track("current")
+    await player.add(current)
+    if paused:
+        await player.pause()
+
+    disconnected = player.voice_client
+    assert disconnected is not None
+    disconnected.connected = False
+    channel.guild.voice_client = None
+    await player.recover_voice(channel, expected_track_id=current.id)
+
+    recovered = channel.guild.voice_client
+    assert recovered is not None
+    assert player.is_paused is paused
+    assert recovered.is_paused() is paused
+    assert recovered.is_playing() is (not paused)
+    assert len(provider.start_offsets) == 2
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_advance_preserves_queue_until_voice_recovery(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    current = make_track("current")
+    following = make_track("following")
+    await player.add(current)
+    await player.add(following)
+    await asyncio.sleep(0.02)
+    generation = player._generation
+    disconnected = player.voice_client
+    assert disconnected is not None
+    disconnected.connected = False
+    channel.guild.voice_client = None
+
+    await player._on_finished(current.id, generation, None)
+
+    assert player.current is None
+    assert list(player.queue) == [following]
+    await player.recover_voice(channel, expected_track_id=None)
+    assert player.current is following
+    assert channel.guild.voice_client is not None
+    assert channel.guild.voice_client.is_playing()
+    await player.close()
+
+
+@pytest.mark.asyncio
 async def test_consecutive_skip_owns_promoted_prefetch(app_config) -> None:
     player, channel, _, _ = build_player(app_config)
     provider = SlowCancelPrefetchProvider()
@@ -782,6 +875,35 @@ async def test_playback_callback_error_retries_same_track_only_once(app_config) 
 
 
 @pytest.mark.asyncio
+async def test_prefetch_failure_consumes_the_track_retry_budget(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = PrefetchFailureProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    current = make_track("current")
+    following = make_track("next")
+    await player.add(current)
+    await player.add(following)
+    for _ in range(100):
+        if provider.calls_by_title.get("next") == 1:
+            break
+        await asyncio.sleep(0.01)
+    assert following.failure_retries == 1
+
+    channel.guild.voice_client.finish()
+    for _ in range(100):
+        if following.state.value == "disposed":
+            break
+        await asyncio.sleep(0.01)
+
+    assert provider.calls_by_title["next"] == 2
+    assert following.state.value == "disposed"
+    await player.close()
+
+
+@pytest.mark.asyncio
 async def test_prepared_cleanup_never_blocks_other_event_loop_work(app_config) -> None:
     player, channel, _, _ = build_player(app_config)
     provider = BlockingCleanupProvider()
@@ -802,6 +924,90 @@ async def test_prepared_cleanup_never_blocks_other_event_loop_work(app_config) -
     source.release_cleanup.set()
     await asyncio.wait_for(stopping, 1)
     assert source.cleaned
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cleanup_returns_within_the_callers_timeout(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = BlockingCleanupProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    source = provider.sources[0]
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(player.stop(), 0.05)
+
+    assert loop.time() - started_at < 0.2
+    assert source.cleanup_started.is_set()
+    source.release_cleanup.set()
+    await asyncio.sleep(0.02)
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_prepared_cleanup_prevents_another_provider_prepare(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = FailingPreparedCleanupProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    await player.add(make_track("current"))
+
+    with pytest.raises(ResourceCleanupError):
+        await player.stop()
+    blocked = make_track("blocked")
+    with pytest.raises(ResourceCleanupError):
+        await player.add(blocked)
+
+    assert provider.prepare_calls == 1
+    assert player.current is None
+    blocked.dispose()
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_reservations_include_pending_and_owned_bytes(app_config) -> None:
+    limited = replace(app_config, max_queued_upload_bytes=10)
+    player, channel, _, _ = build_player(limited)
+    await player.connect(channel)
+    current = make_track("current")
+    current.provider_data["upload_size"] = 4
+    await player.add(current)
+    reservation = await player.reserve_upload(6)
+
+    with pytest.raises(QueueLimitError):
+        await player.reserve_upload(1)
+
+    await player.release_upload_reservation(reservation)
+    accepted = await player.reserve_upload(6)
+    assert accepted is not None
+    await player.release_upload_reservation(accepted)
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_upload_reservations_cannot_overcommit_memory(app_config) -> None:
+    limited = replace(app_config, max_queued_upload_bytes=10)
+    player, _, _, _ = build_player(limited)
+
+    results = await asyncio.gather(
+        player.reserve_upload(6),
+        player.reserve_upload(6),
+        return_exceptions=True,
+    )
+
+    reservations = [result for result in results if not isinstance(result, BaseException)]
+    errors = [result for result in results if isinstance(result, BaseException)]
+    assert len(reservations) == 1
+    assert len(errors) == 1 and isinstance(errors[0], QueueLimitError)
+    await player.release_upload_reservation(reservations[0])
     await player.close()
 
 
@@ -831,4 +1037,9 @@ async def test_failed_detached_cleanup_prevents_another_source(app_config) -> No
     assert player.current is None
     assert second.state.value == "disposed"
     assert any(event == "music.prepare.failed" for _, event, _, _ in reporter.reports)
+    third = make_track("third")
+    with pytest.raises(ResourceCleanupError):
+        await player.add(third)
+    assert provider.prepare_calls == 1
+    third.dispose()
     await player.close()

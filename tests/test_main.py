@@ -5,6 +5,7 @@ import signal
 
 import pytest
 
+from charlotte import __main__ as main_module
 from charlotte.__main__ import _run_bot
 
 
@@ -53,3 +54,42 @@ async def test_sigterm_requests_graceful_bot_close(monkeypatch) -> None:
     assert bot.reconnect is True
     assert bot.close_calls >= 1
     assert signal.SIGTERM in removed
+
+
+class CloseDoesNotWakeBot:
+    def __init__(self, *, close_hangs: bool = False) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.close_hangs = close_hangs
+        self.close_calls = 0
+
+    async def start(self, token, *, reconnect):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
+
+    async def close(self):
+        self.close_calls += 1
+        if self.close_hangs:
+            await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_hangs", [False, True])
+async def test_shutdown_cancels_start_task_even_when_close_does_not_wake_it(
+    monkeypatch, close_hangs
+) -> None:
+    monkeypatch.setattr(main_module, "SHUTDOWN_RUNNER_TIMEOUT", 0.05)
+    bot = CloseDoesNotWakeBot(close_hangs=close_hangs)
+    requested = asyncio.Event()
+    running = asyncio.create_task(_run_bot(bot, "test-token", shutdown_event=requested))
+    await asyncio.wait_for(bot.started.wait(), 1)
+
+    requested.set()
+    await asyncio.wait_for(running, 0.3)
+
+    assert bot.close_calls == 1
+    assert bot.cancelled.is_set()

@@ -42,6 +42,7 @@ class MusicCommandsCog(commands.Cog):
         owned_by_player = False
         normalized_url: str | None = None
         filename: str | None = None
+        upload_reservation = None
         try:
             attachments = tuple(ctx.message.attachments)
             normalized_url = url.strip() if url else None
@@ -65,15 +66,25 @@ class MusicCommandsCog(commands.Cog):
             target_channel = ctx.author.voice.channel
             _check_voice_permissions(ctx.guild.me, target_channel)
 
+            if attachments:
+                upload_reservation = await player.reserve_upload(
+                    getattr(attachments[0], "size", None)
+                )
+
             request = RequestContext(
                 guild_id=ctx.guild.id,
                 text_channel_id=ctx.channel.id,
                 requester_id=ctx.author.id,
                 requester_display_name=ctx.author.display_name,
+                max_upload_bytes=self.bot.config.max_queued_upload_bytes,
             )
             async with ctx.typing():
                 if attachments:
                     track = await self.bot.providers.inspect_upload(request, attachments[0])
+                    await player.adjust_upload_reservation(
+                        upload_reservation,
+                        track.upload_size,
+                    )
                 else:
                     parsed = urlparse(normalized_url)
                     if not parsed.scheme or not parsed.hostname:
@@ -171,6 +182,8 @@ class MusicCommandsCog(commands.Cog):
                 url=normalized_url,
                 filename=filename,
             )
+        finally:
+            await player.release_upload_reservation(upload_reservation)
 
     @commands.command(name="skip")
     @commands.guild_only()
@@ -364,11 +377,12 @@ class MusicCommandsCog(commands.Cog):
             and member.id == self.bot.user.id
             and before.channel is not None
             and after.channel is None
-            and player.current is not None
+            and player.has_activity
         ):
+            current = player.current
             await player.recover_voice(
                 before.channel,
-                expected_track_id=player.current.id,
+                expected_track_id=current.id if current is not None else None,
             )
             return
         channel = player.bot_channel

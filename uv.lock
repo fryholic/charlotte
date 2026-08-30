@@ -170,6 +170,7 @@ name = "charlotte"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "discord-py", extra = ["voice"] },
     { name = "mutagen" },
     { name = "python-dotenv" },
@@ -186,6 +187,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.12,<4" },
     { name = "discord-py", extras = ["voice"], specifier = ">=2.7.0,<3" },
     { name = "mutagen", specifier = ">=1.47,<2" },
     { name = "python-dotenv", specifier = ">=1.1,<2" },

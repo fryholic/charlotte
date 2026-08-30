@@ -6,7 +6,7 @@ import wave
 
 import pytest
 
-from charlotte.errors import SourceUnavailableError, UserInputError
+from charlotte.errors import QueueLimitError, SourceUnavailableError, UserInputError
 from charlotte.music.models import RequestContext
 from charlotte.providers import upload as upload_module
 from charlotte.providers.upload import UploadProvider
@@ -17,14 +17,55 @@ class Attachment:
         self.data = data
         self.content_type = content_type
         self.filename = filename
+        self.size = len(data)
+        self.read_called = False
 
     async def read(self) -> bytes:
+        self.read_called = True
         return self.data
 
 
 class FailingAttachment(Attachment):
     async def read(self) -> bytes:
         raise RuntimeError("network failed")
+
+
+class FakeContent:
+    def __init__(self, chunks) -> None:
+        self.chunks = chunks
+
+    async def iter_chunked(self, size):
+        for chunk in self.chunks:
+            yield chunk
+
+
+class FakeResponse:
+    def __init__(self, chunks, *, content_length=None) -> None:
+        self.content = FakeContent(chunks)
+        self.content_length = content_length
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class FakeSession:
+    def __init__(self, response) -> None:
+        self.response = response
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    def get(self, url):
+        return self.response
 
 
 def wav_bytes(*, frames: int = 800, rate: int = 8000) -> bytes:
@@ -71,6 +112,31 @@ async def test_attachment_transport_failure_is_reportable() -> None:
     with pytest.raises(SourceUnavailableError) as caught:
         await provider.inspect_upload(RequestContext(1, 2, 3, "requester"), FailingAttachment(b""))
     assert caught.value.message_id == "music.play.attachment_read_failed"
+
+
+@pytest.mark.asyncio
+async def test_declared_oversized_attachment_is_rejected_before_read() -> None:
+    provider = UploadProvider()
+    attachment = Attachment(wav_bytes())
+    request = RequestContext(1, 2, 3, "requester", max_upload_bytes=10)
+
+    with pytest.raises(QueueLimitError):
+        await provider.inspect_upload(request, attachment)
+
+    assert not attachment.read_called
+
+
+@pytest.mark.asyncio
+async def test_bounded_cdn_read_stops_before_size_mismatch_can_allocate_more(monkeypatch) -> None:
+    response = FakeResponse([b"123", b"456"])
+    monkeypatch.setattr(
+        upload_module.aiohttp,
+        "ClientSession",
+        lambda **kwargs: FakeSession(response),
+    )
+
+    with pytest.raises(QueueLimitError):
+        await upload_module._read_cdn_bounded("https://cdn.example/audio", 5)
 
 
 @pytest.mark.asyncio

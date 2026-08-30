@@ -147,6 +147,15 @@ class CommandPlayer:
     async def cancel_receipt(self, receipt):
         self.cancelled = True
 
+    async def reserve_upload(self, declared_size):
+        return None
+
+    async def adjust_upload_reservation(self, reservation, actual_size):
+        return None
+
+    async def release_upload_reservation(self, reservation):
+        return None
+
     async def commit_play(self, track, channel, *, access_check):
         assert access_check(self.bot_channel)
         self.stopped = self.bot_channel is not None and self.bot_channel != channel
@@ -166,7 +175,11 @@ def bot_for(player):
         players=Players(player),
         providers=Providers(),
         reporter=FakeReporter(),
-        config=SimpleNamespace(command_prefix="!", operator_user_ids=frozenset()),
+        config=SimpleNamespace(
+            command_prefix="!",
+            operator_user_ids=frozenset(),
+            max_queued_upload_bytes=0,
+        ),
         log=logging.getLogger("test.music_commands"),
     )
 

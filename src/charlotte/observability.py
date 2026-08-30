@@ -28,6 +28,10 @@ _SECRET_MAPPING = re.compile(
     r"(?i)(['\"]?(?:token|cookie|authorization|password|secret|signature|sig|key|session_id|verify_key)['\"]?\s*:\s*['\"])([^'\"]+)"
 )
 _SECRET_HEADER = re.compile(r"(?i)\b(authorization|cookie|set-cookie)\s*:\s*([^\r\n,}]+)")
+_SECRET_COLON = re.compile(
+    r"(?i)\b((?:[a-z0-9]+_)*(?:token|key|secret|password|signature|sig|session_id|verify_key))"
+    r"\s*:\s*([^\s,;}\]]+)"
+)
 _URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s<>'\",\]\)]+")
 _SENSITIVE_QUERY_KEYS = {
     "auth",
@@ -113,6 +117,7 @@ def redact(value: object, *, secrets: tuple[str, ...] = ()) -> object:
         scrubbed = _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[redacted]", scrubbed)
         scrubbed = _SECRET_MAPPING.sub(lambda match: f"{match.group(1)}[redacted]", scrubbed)
         scrubbed = _SECRET_HEADER.sub(lambda match: f"{match.group(1)}: [redacted]", scrubbed)
+        scrubbed = _SECRET_COLON.sub(lambda match: f"{match.group(1)}: [redacted]", scrubbed)
         return scrubbed
     if isinstance(value, dict):
         return {

@@ -7,13 +7,14 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 from collections.abc import Callable
 from typing import Any
 
 import discord
 
-from charlotte.constants import YTDLP_SOCKET_TIMEOUT
+from charlotte.constants import FFMPEG_TERMINATE_TIMEOUT, YTDLP_SOCKET_TIMEOUT
 from charlotte.music.models import PreparedAudio
 from charlotte.music.provider import register_detached_work
 from charlotte.observability import log_exception
@@ -80,6 +81,23 @@ def _consume_completion_exception(completion: asyncio.Future[None]) -> None:
 
 class YtdlpError(RuntimeError):
     pass
+
+
+class BoundedFFmpegOpusAudio(discord.FFmpegOpusAudio):
+    """Terminate FFmpeg without discord.py's unbounded communicate() fallback."""
+
+    def _kill_process(self) -> None:
+        process = getattr(self, "_process", None)
+        if process is None or not hasattr(process, "poll"):
+            return
+        try:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=FFMPEG_TERMINATE_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("FFmpeg did not terminate within the cleanup deadline") from exc
+        except ProcessLookupError:
+            return
 
 
 async def extract(url: str, *, playlist: bool) -> dict[str, Any]:
@@ -160,10 +178,10 @@ async def stream_audio(url: str, *, start_at: float = 0) -> PreparedAudio:
     if start_at > 0:
         before = f"-ss {start_at:.3f} {before}"
 
-    def create() -> tuple[discord.FFmpegOpusAudio, Any]:
+    def create() -> tuple[BoundedFFmpegOpusAudio, Any]:
         stderr_sink = open(os.devnull, "wb")
         try:
-            source = discord.FFmpegOpusAudio(
+            source = BoundedFFmpegOpusAudio(
                 url,
                 before_options=before,
                 options="-vn -c:a libopus -b:a 320k -ar 48000 -ac 2",
@@ -174,7 +192,7 @@ async def stream_audio(url: str, *, start_at: float = 0) -> PreparedAudio:
             raise
         return source, stderr_sink
 
-    def cleanup_cancelled(result: tuple[discord.FFmpegOpusAudio, Any]) -> None:
+    def cleanup_cancelled(result: tuple[BoundedFFmpegOpusAudio, Any]) -> None:
         source, stderr_sink = result
         try:
             source.cleanup()

@@ -9,20 +9,21 @@ import os
 from typing import Any
 from urllib.parse import ParseResult
 
+import aiohttp
 import discord
 from mutagen import File as MutagenFile
 
 from charlotte.constants import ATTACHMENT_READ_TIMEOUT
-from charlotte.errors import PlaybackError, SourceUnavailableError, UserInputError
+from charlotte.errors import PlaybackError, QueueLimitError, SourceUnavailableError, UserInputError
 from charlotte.music.models import PreparedAudio, RequestContext, Track
-from charlotte.providers.ytdlp_common import run_blocking
+from charlotte.providers.ytdlp_common import BoundedFFmpegOpusAudio, run_blocking
 
 
 class _InvalidAudio(ValueError):
     pass
 
 
-class _MemoryFFmpegOpusAudio(discord.FFmpegOpusAudio):
+class _MemoryFFmpegOpusAudio(BoundedFFmpegOpusAudio):
     """Silence the benign pipe-close race that discord.py leaves outside its try block."""
 
     def _pipe_writer(self, source: io.BufferedIOBase) -> None:
@@ -63,15 +64,35 @@ class UploadProvider:
         raise UserInputError("music.play.invalid_url")
 
     async def inspect_upload(self, request: RequestContext, attachment: Any) -> Track:
+        declared_size = getattr(attachment, "size", None)
+        read_limit = 0
+        bounded_read = False
+        if request.max_upload_bytes:
+            if not isinstance(declared_size, int) or declared_size < 0:
+                raise QueueLimitError()
+            if declared_size > request.max_upload_bytes:
+                raise QueueLimitError()
+            read_limit = declared_size
+            bounded_read = True
         try:
             async with asyncio.timeout(ATTACHMENT_READ_TIMEOUT):
-                raw = await attachment.read()
+                url = getattr(attachment, "url", None)
+                if bounded_read and isinstance(url, str) and url:
+                    raw = await _read_cdn_bounded(url, read_limit)
+                else:
+                    raw = await attachment.read()
+        except QueueLimitError:
+            raise
         except TimeoutError as exc:
             raise SourceUnavailableError("music.play.attachment_read_failed", str(exc)) from exc
         except Exception as exc:
             raise SourceUnavailableError("music.play.attachment_read_failed", str(exc)) from exc
         if not isinstance(raw, bytes) or not raw:
             raise UserInputError("music.play.invalid_attachment")
+        if request.max_upload_bytes and len(raw) > request.max_upload_bytes:
+            raise QueueLimitError()
+        if bounded_read and len(raw) != declared_size:
+            raise QueueLimitError()
 
         try:
             probe = await _probe(raw)
@@ -146,6 +167,22 @@ class UploadProvider:
         return PreparedAudio(
             source=source, seekable=True, owned_resources=(pipe_buffer, stderr_sink)
         )
+
+
+async def _read_cdn_bounded(url: str, max_bytes: int) -> bytes:
+    timeout = aiohttp.ClientTimeout(total=ATTACHMENT_READ_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            content_length = response.content_length
+            if content_length is not None and content_length > max_bytes:
+                raise QueueLimitError()
+            data = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                if len(data) + len(chunk) > max_bytes:
+                    raise QueueLimitError()
+                data.extend(chunk)
+    return bytes(data)
 
 
 async def _probe(raw: bytes) -> dict[str, Any]:
