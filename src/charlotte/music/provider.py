@@ -140,6 +140,19 @@ class ProviderRegistry:
         provider = self._providers[track.provider]
         return await self._call(provider.name, lambda: provider.prepare(track, start_at=start_at))
 
+    def preparation_memory_bytes(self, track: Track) -> int:
+        """Return memory a provider will allocate before preparing the source."""
+
+        self.ensure_available(track.provider)
+        provider = self._providers[track.provider]
+        estimator = getattr(provider, "preparation_memory_bytes", None)
+        if estimator is None:
+            return 0
+        estimate = estimator(track)
+        if not isinstance(estimate, int) or isinstance(estimate, bool) or estimate < 0:
+            raise ProviderError(f"Invalid preparation memory estimate: {track.provider}")
+        return estimate
+
     async def _call(self, name: str, operation: Callable[[], Awaitable[Any]]) -> Any:
         if name in self._unloading:
             raise ProviderError(f"Provider is unloading: {name}")

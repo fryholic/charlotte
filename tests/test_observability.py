@@ -43,6 +43,22 @@ def test_redacts_unquoted_colon_delimited_secret_suffixes() -> None:
         assert secret not in payload
 
 
+@pytest.mark.parametrize(
+    "raw, secret",
+    [
+        ("Authorization=Bearer supersecret", "supersecret"),
+        ("authorization = Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"),
+    ],
+)
+def test_redacts_entire_authorization_assignment(raw, secret) -> None:
+    value = redact(raw)
+    assert secret not in value
+    assert value.lower() == "authorization=[redacted]"
+
+    record = logging.LogRecord("charlotte.test", logging.ERROR, __file__, 1, raw, (), None)
+    assert secret not in JsonFormatter().format(record)
+
+
 def test_redacts_sensitive_mapping_values_and_nested_formatter_fields() -> None:
     secrets = {
         "cookie": "session-secret",

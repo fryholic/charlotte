@@ -7,6 +7,7 @@ import logging
 import uuid
 from collections import deque
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 import discord
@@ -86,10 +87,13 @@ class GuildPlayer:
         self._paused_total = 0.0
         self._prefetch_task: asyncio.Task[None] | None = None
         self._current_prepare_task: asyncio.Task[bool] | None = None
-        self._detached_source_cleanup: set[asyncio.Future[None]] = set()
-        self._prepared_cleanup_tasks: dict[asyncio.Task[None], str] = {}
+        self._detached_source_cleanup: dict[asyncio.Future[None], str | None] = {}
+        self._detached_upload_work: dict[asyncio.Future[None], str | None] = {}
+        self._prepared_cleanup_tasks: dict[asyncio.Task[None], tuple[str, str | None]] = {}
         self._source_cleanup_failure: ResourceCleanupError | None = None
         self._upload_reservations: dict[str, int] = {}
+        self._deferred_upload_reservations: set[str] = set()
+        self._prepared_memory_reservations: dict[str, int] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._report_tasks: set[asyncio.Task[Any]] = set()
         self.log = logging.getLogger(f"charlotte.player.{guild_id}")
@@ -123,7 +127,9 @@ class GuildPlayer:
         async with self.lock:
             if self._closed:
                 raise PlaybackError("Player is closed")
-            used = self._owned_upload_bytes_locked() + sum(self._upload_reservations.values())
+            if self._source_cleanup_failure is not None:
+                raise self._source_cleanup_failure
+            used = self._total_upload_bytes_locked()
             if used + declared_size > limit:
                 raise QueueLimitError()
             reservation = UploadReservation(uuid.uuid4().hex, declared_size)
@@ -146,7 +152,10 @@ class GuildPlayer:
                 if reservation_id != reservation.id
             )
             if (
-                self._owned_upload_bytes_locked() + reserved_elsewhere + actual_size
+                self._owned_upload_bytes_locked()
+                + sum(self._prepared_memory_reservations.values())
+                + reserved_elsewhere
+                + actual_size
                 > self.config.max_queued_upload_bytes
             ):
                 raise QueueLimitError()
@@ -156,7 +165,23 @@ class GuildPlayer:
         if reservation is None:
             return
         async with self.lock:
+            if reservation.id in self._deferred_upload_reservations:
+                return
             self._upload_reservations.pop(reservation.id, None)
+
+    @contextmanager
+    def observe_upload_work(self, reservation: UploadReservation | None):
+        """Keep cancelled upload inspection memory reserved until its worker exits."""
+
+        def observe(completion: asyncio.Future[None]) -> None:
+            reservation_id = reservation.id if reservation is not None else None
+            self._detached_upload_work[completion] = reservation_id
+            if reservation_id is not None:
+                self._deferred_upload_reservations.add(reservation_id)
+            completion.add_done_callback(self._detached_upload_work_done)
+
+        with observe_detached_work(observe):
+            yield
 
     async def wait_for_receipt(self, receipt: int) -> None:
         async with self._receipt_condition:
@@ -232,6 +257,7 @@ class GuildPlayer:
         channel: discord.abc.Connectable,
         *,
         access_check: Callable[[discord.abc.Connectable | None], bool],
+        upload_reservation: UploadReservation | None = None,
     ) -> PlayCommitResult:
         async with self._connection_lock:
             self._assert_access_locked(access_check)
@@ -247,7 +273,11 @@ class GuildPlayer:
                     removed_count = stopped.removed_count
             moved = await self._connect_locked(channel)
             try:
-                accepted = await self._accept_track(track, access_check=access_check)
+                accepted = await self._accept_track(
+                    track,
+                    access_check=access_check,
+                    upload_reservation=upload_reservation,
+                )
             except BaseException:
                 if not had_voice or remote_move:
                     voice = self._active_voice_client()
@@ -278,6 +308,7 @@ class GuildPlayer:
         track: Track,
         *,
         access_check: Callable[[discord.abc.Connectable | None], bool] | None = None,
+        upload_reservation: UploadReservation | None = None,
     ) -> tuple[bool, bool, int, int | None]:
         start_track = False
         resume_preserved_queue = False
@@ -289,7 +320,7 @@ class GuildPlayer:
             if self._source_cleanup_failure is not None:
                 raise self._source_cleanup_failure
             self.providers.ensure_available(track.provider)
-            self._enforce_limits(track)
+            self._enforce_limits(track, upload_reservation=upload_reservation)
             if self.current is None and not self.queue:
                 self.current = track
                 track.state = TrackState.PREPARING
@@ -303,6 +334,9 @@ class GuildPlayer:
                 position = len(self.queue)
                 resume_preserved_queue = self.current is None
                 self._ensure_prefetch_locked()
+            if upload_reservation is not None:
+                self._upload_reservations.pop(upload_reservation.id)
+                self._deferred_upload_reservations.discard(upload_reservation.id)
         return start_track, resume_preserved_queue, generation, position
 
     async def _finish_add(
@@ -1072,51 +1106,147 @@ class GuildPlayer:
             await self._safe_cleanup_prepared(prepared, "music.prefetch.cancel_cleanup_failed")
 
     async def _prepare_audio(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
-        async with asyncio.timeout(PROVIDER_OPERATION_TIMEOUT):
-            await self._await_prepared_cleanup()
-            await self._await_detached_source_cleanup()
-            with observe_detached_work(self._track_detached_source_cleanup):
-                return await self.providers.prepare(track, start_at=start_at)
+        memory_bytes = self.providers.preparation_memory_bytes(track)
+        memory_reservation_id: str | None = None
+        detached = False
+        memory_transferred = False
 
-    def _track_detached_source_cleanup(self, completion: asyncio.Future[None]) -> None:
-        self._detached_source_cleanup.add(completion)
+        def observe(completion: asyncio.Future[None]) -> None:
+            nonlocal detached
+            detached = True
+            self._track_detached_source_cleanup(completion, memory_reservation_id)
+
+        async with asyncio.timeout(PROVIDER_OPERATION_TIMEOUT):
+            try:
+                await self._await_prepared_cleanup()
+                await self._await_detached_source_cleanup()
+                memory_reservation_id = await self._reserve_prepared_memory(memory_bytes)
+                with observe_detached_work(observe):
+                    prepared = await self.providers.prepare(track, start_at=start_at)
+                if prepared.memory_bytes != memory_bytes:
+                    prepared.memory_reservation_id = memory_reservation_id
+                    memory_transferred = True
+                    await self._safe_cleanup_prepared(
+                        prepared, "music.prepare.memory_contract_cleanup_failed"
+                    )
+                    raise PlaybackError(f"Provider preparation memory mismatch: {track.provider}")
+                prepared.memory_reservation_id = memory_reservation_id
+                memory_transferred = True
+                return prepared
+            except BaseException:
+                if memory_reservation_id is not None and not detached and not memory_transferred:
+                    self._prepared_memory_reservations.pop(memory_reservation_id, None)
+                raise
+
+    async def _reserve_prepared_memory(self, memory_bytes: int) -> str | None:
+        limit = self.config.max_queued_upload_bytes
+        if not limit or not memory_bytes:
+            return None
+        async with self.lock:
+            if self._closed:
+                raise PlaybackError("Player is closed")
+            if self._source_cleanup_failure is not None:
+                raise self._source_cleanup_failure
+            if self._total_upload_bytes_locked() + memory_bytes > limit:
+                raise QueueLimitError()
+            reservation_id = uuid.uuid4().hex
+            self._prepared_memory_reservations[reservation_id] = memory_bytes
+            return reservation_id
+
+    def _track_detached_source_cleanup(
+        self, completion: asyncio.Future[None], memory_reservation_id: str | None
+    ) -> None:
+        self._detached_source_cleanup[completion] = memory_reservation_id
+        completion.add_done_callback(self._detached_source_cleanup_done)
+
+    def _detached_source_cleanup_done(self, completion: asyncio.Future[None]) -> None:
+        memory_reservation_id = self._detached_source_cleanup.pop(completion, None)
+        try:
+            error = asyncio.CancelledError() if completion.cancelled() else completion.exception()
+        except asyncio.CancelledError as exc:
+            error = exc
+        if error is not None:
+            self._record_source_cleanup_failure(error, "music.detached_cleanup.failed")
+            return
+        if memory_reservation_id is not None:
+            self._prepared_memory_reservations.pop(memory_reservation_id, None)
+
+    def _detached_upload_work_done(self, completion: asyncio.Future[None]) -> None:
+        reservation_id = self._detached_upload_work.pop(completion, None)
+        if reservation_id is not None:
+            self._deferred_upload_reservations.discard(reservation_id)
+            self._upload_reservations.pop(reservation_id, None)
+        try:
+            error = asyncio.CancelledError() if completion.cancelled() else completion.exception()
+        except asyncio.CancelledError as exc:
+            error = exc
+        if error is not None:
+            log_exception(
+                self.log,
+                error,
+                event="music.upload.detached_inspection_failed",
+                context={"guild_id": self.guild_id},
+            )
 
     async def _await_detached_source_cleanup(self) -> None:
         while self._detached_source_cleanup:
             batch = tuple(self._detached_source_cleanup)
             pending = asyncio.gather(*batch, return_exceptions=True)
             results = await asyncio.shield(pending)
-            self._detached_source_cleanup.difference_update(batch)
-            error = next((result for result in results if isinstance(result, BaseException)), None)
-            if error is not None:
-                raise self._record_source_cleanup_failure(
-                    error, "music.detached_cleanup.failed"
-                ) from error
+            for completion, result in zip(batch, results, strict=True):
+                memory_reservation_id = self._detached_source_cleanup.pop(completion, None)
+                if isinstance(result, BaseException):
+                    self._record_source_cleanup_failure(result, "music.detached_cleanup.failed")
+                elif memory_reservation_id is not None:
+                    self._prepared_memory_reservations.pop(memory_reservation_id, None)
+        if self._source_cleanup_failure is not None:
+            raise self._source_cleanup_failure
 
     async def _drain_source_cleanup(self) -> None:
         try:
             async with asyncio.timeout(SHUTDOWN_DETACHED_CLEANUP_TIMEOUT):
-                while self._detached_source_cleanup or self._prepared_cleanup_tasks:
+                while (
+                    self._detached_source_cleanup
+                    or self._detached_upload_work
+                    or self._prepared_cleanup_tasks
+                ):
                     detached_batch = tuple(self._detached_source_cleanup)
+                    upload_batch = tuple(self._detached_upload_work)
                     prepared_batch = tuple(self._prepared_cleanup_tasks)
-                    batch = (*detached_batch, *prepared_batch)
+                    batch = (*detached_batch, *upload_batch, *prepared_batch)
                     pending = asyncio.gather(*batch, return_exceptions=True)
                     results = await asyncio.shield(pending)
-                    self._detached_source_cleanup.difference_update(detached_batch)
-                    for task in prepared_batch:
-                        self._prepared_cleanup_tasks.pop(task, None)
-                    for index, result in enumerate(results):
+                    for index, (completion, result) in enumerate(zip(batch, results, strict=True)):
                         if isinstance(result, BaseException):
                             if index < len(detached_batch):
                                 self._record_source_cleanup_failure(
                                     result,
                                     "music.shutdown.detached_cleanup_failed",
                                 )
+                            elif index < len(detached_batch) + len(upload_batch):
+                                log_exception(
+                                    self.log,
+                                    result,
+                                    event="music.shutdown.upload_inspection_failed",
+                                    context={"guild_id": self.guild_id},
+                                )
                             else:
                                 self._record_source_cleanup_failure(
-                                    result,
-                                    "music.shutdown.prepared_cleanup_failed",
+                                    result, "music.shutdown.prepared_cleanup_failed"
                                 )
+                        if completion in self._detached_source_cleanup:
+                            memory_reservation_id = self._detached_source_cleanup.pop(completion)
+                            if not isinstance(result, BaseException) and (
+                                memory_reservation_id is not None
+                            ):
+                                self._prepared_memory_reservations.pop(memory_reservation_id, None)
+                        if completion in self._detached_upload_work:
+                            reservation_id = self._detached_upload_work.pop(completion)
+                            if reservation_id is not None:
+                                self._deferred_upload_reservations.discard(reservation_id)
+                                self._upload_reservations.pop(reservation_id, None)
+                        if completion in self._prepared_cleanup_tasks:
+                            self._finalize_prepared_cleanup_task(completion, result)
         except TimeoutError as exc:
             log_exception(
                 self.log,
@@ -1179,22 +1309,42 @@ class GuildPlayer:
         if cleanup_error is not None:
             raise cleanup_error
 
-    def _enforce_limits(self, incoming: Track) -> None:
+    def _enforce_limits(
+        self,
+        incoming: Track,
+        *,
+        upload_reservation: UploadReservation | None = None,
+    ) -> None:
         if self.config.max_queue_tracks and (self.current is not None or self.queue):
             if len(self.queue) >= self.config.max_queue_tracks:
                 raise QueueLimitError()
-        if self.config.max_queued_upload_bytes and incoming.upload_size:
-            used = sum(track.upload_size for track in self.queue)
-            if self.current is not None:
-                used += self.current.upload_size
-            if used + incoming.upload_size > self.config.max_queued_upload_bytes:
+        limit = self.config.max_queued_upload_bytes
+        if not limit:
+            return
+        if upload_reservation is not None:
+            reserved = self._upload_reservations.get(upload_reservation.id)
+            if reserved is None:
+                raise PlaybackError("Upload reservation is no longer active")
+            if reserved != incoming.upload_size:
+                raise PlaybackError("Upload reservation does not match the track")
+            if self._total_upload_bytes_locked() > limit:
                 raise QueueLimitError()
+            return
+        if self._total_upload_bytes_locked() + incoming.upload_size > limit:
+            raise QueueLimitError()
 
     def _owned_upload_bytes_locked(self) -> int:
         used = sum(track.upload_size for track in self.queue)
         if self.current is not None:
             used += self.current.upload_size
         return used
+
+    def _total_upload_bytes_locked(self) -> int:
+        return (
+            self._owned_upload_bytes_locked()
+            + sum(self._upload_reservations.values())
+            + sum(self._prepared_memory_reservations.values())
+        )
 
     def _active_voice_client(self) -> discord.VoiceClient | None:
         voice = self.voice_client
@@ -1251,7 +1401,7 @@ class GuildPlayer:
 
     def _begin_prepared_cleanup(self, prepared: PreparedAudio, event: str) -> asyncio.Task[None]:
         cleanup = asyncio.create_task(asyncio.to_thread(prepared.cleanup))
-        self._prepared_cleanup_tasks[cleanup] = event
+        self._prepared_cleanup_tasks[cleanup] = (event, prepared.memory_reservation_id)
         cleanup.add_done_callback(self._prepared_cleanup_done)
         return cleanup
 
@@ -1261,19 +1411,27 @@ class GuildPlayer:
             pending = asyncio.gather(*batch, return_exceptions=True)
             results = await asyncio.shield(pending)
             for task, result in zip(batch, results, strict=True):
-                event = self._prepared_cleanup_tasks.pop(task, "music.cleanup.failed")
-                if isinstance(result, BaseException):
-                    self._record_source_cleanup_failure(result, event)
+                self._finalize_prepared_cleanup_task(task, result)
         if self._source_cleanup_failure is not None:
             raise self._source_cleanup_failure
 
     def _prepared_cleanup_done(self, task: asyncio.Task[None]) -> None:
-        event = self._prepared_cleanup_tasks.pop(task, None)
-        if event is None or task.cancelled():
+        if task.cancelled():
+            result: BaseException | None = asyncio.CancelledError()
+        else:
+            result = task.exception()
+        self._finalize_prepared_cleanup_task(task, result)
+
+    def _finalize_prepared_cleanup_task(self, task: asyncio.Task[None], result: object) -> None:
+        details = self._prepared_cleanup_tasks.pop(task, None)
+        if details is None:
             return
-        error = task.exception()
-        if error is not None:
-            self._record_source_cleanup_failure(error, event)
+        event, memory_reservation_id = details
+        if isinstance(result, BaseException):
+            self._record_source_cleanup_failure(result, event)
+            return
+        if memory_reservation_id is not None:
+            self._prepared_memory_reservations.pop(memory_reservation_id, None)
 
     def _record_source_cleanup_failure(
         self, error: BaseException, event: str

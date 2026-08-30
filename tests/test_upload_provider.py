@@ -159,6 +159,7 @@ async def test_valid_upload_builds_and_cleans_a_pipe_ffmpeg_source() -> None:
     )
     prepared = await provider.prepare(track)
     playback_buffer = prepared.owned_resources[0]
+    assert prepared.memory_bytes == track.upload_size
     prepared.cleanup()
     track.dispose()
     assert playback_buffer.closed

@@ -56,6 +56,16 @@ async def _run_bot(
     """Run Discord until it exits or the container requests a graceful stop."""
 
     loop = asyncio.get_running_loop()
+    health_writer = getattr(bot, "health_writer", None)
+    if health_writer is not None:
+        try:
+            await asyncio.to_thread(health_writer.mark_starting)
+        except Exception as error:
+            log_exception(
+                logging.getLogger("charlotte.health"),
+                error,
+                event="health.initialize_failed",
+            )
     stop_requested = shutdown_event or asyncio.Event()
     installed_signals: list[signal.Signals] = []
     for requested_signal in (signal.SIGTERM,):

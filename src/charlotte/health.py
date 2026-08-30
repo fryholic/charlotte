@@ -40,16 +40,43 @@ class HealthWriter:
                 )
             await asyncio.sleep(15)
 
+    def mark_starting(self) -> None:
+        """Invalidate a health file left by an earlier process in this container."""
+
+        self._write_payload(
+            ready=False,
+            closed=False,
+            latency=None,
+            heartbeat_at=None,
+        )
+
     def _write(self) -> None:
         latency = float(getattr(self.bot, "latency", math.inf))
         ready = bool(self.bot.is_ready() and not self.bot.is_closed() and math.isfinite(latency))
         now = time.time()
+        self._write_payload(
+            ready=ready,
+            closed=self.bot.is_closed(),
+            latency=latency if math.isfinite(latency) else None,
+            heartbeat_at=now if ready else None,
+            updated_at=now,
+        )
+
+    def _write_payload(
+        self,
+        *,
+        ready: bool,
+        closed: bool,
+        latency: float | None,
+        heartbeat_at: float | None,
+        updated_at: float | None = None,
+    ) -> None:
         payload = {
             "ready": ready,
-            "closed": self.bot.is_closed(),
-            "latency": latency if math.isfinite(latency) else None,
-            "heartbeat_at": now if ready else None,
-            "updated_at": now,
+            "closed": closed,
+            "latency": latency,
+            "heartbeat_at": heartbeat_at,
+            "updated_at": time.time() if updated_at is None else updated_at,
         }
         temporary = self.path.with_suffix(".tmp")
         temporary.parent.mkdir(parents=True, exist_ok=True)

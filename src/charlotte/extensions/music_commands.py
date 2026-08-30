@@ -80,7 +80,8 @@ class MusicCommandsCog(commands.Cog):
             )
             async with ctx.typing():
                 if attachments:
-                    track = await self.bot.providers.inspect_upload(request, attachments[0])
+                    with player.observe_upload_work(upload_reservation):
+                        track = await self.bot.providers.inspect_upload(request, attachments[0])
                     await player.adjust_upload_reservation(
                         upload_reservation,
                         track.upload_size,
@@ -119,6 +120,7 @@ class MusicCommandsCog(commands.Cog):
                         track,
                         target_channel,
                         access_check=self._play_guard(ctx, target_channel),
+                        upload_reservation=upload_reservation,
                     )
                 except AccessDeniedError:
                     current = decide_play(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
@@ -216,6 +217,22 @@ class FailingPreparedCleanupProvider(FakeProvider):
     async def prepare(self, track, *, start_at=0):
         self.prepare_calls += 1
         return PreparedAudio(source=FailingCleanupSource(), seekable=True)
+
+
+class UploadCopyProvider(FakeProvider):
+    def preparation_memory_bytes(self, track) -> int:
+        return track.upload_size
+
+    async def prepare(self, track, *, start_at=0):
+        buffer = io.BytesIO(b"x" * track.upload_size)
+        source = FakeSource()
+        self.sources.append(source)
+        return PreparedAudio(
+            source=source,
+            seekable=True,
+            owned_resources=(buffer,),
+            memory_bytes=track.upload_size,
+        )
 
 
 class DelayedReconnectChannel(FakeVoiceChannel):
@@ -1009,6 +1026,108 @@ async def test_concurrent_upload_reservations_cannot_overcommit_memory(app_confi
     assert len(errors) == 1 and isinstance(errors[0], QueueLimitError)
     await player.release_upload_reservation(reservations[0])
     await player.close()
+
+
+@pytest.mark.asyncio
+async def test_upload_reservation_transfers_atomically_to_accepted_track(app_config) -> None:
+    limited = replace(app_config, max_queued_upload_bytes=10)
+    player, channel, _, _ = build_player(limited)
+    track = make_track("upload")
+    track.provider_data["upload_size"] = 6
+    reservation = await player.reserve_upload(6)
+    assert reservation is not None
+
+    result = await player.commit_play(
+        track,
+        channel,
+        access_check=lambda _: True,
+        upload_reservation=reservation,
+    )
+    assert result.add_result.started
+    remaining = await player.reserve_upload(4)
+    assert remaining is not None
+
+    await player.release_upload_reservation(remaining)
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_upload_worker_keeps_its_memory_reserved(app_config) -> None:
+    limited = replace(app_config, max_queued_upload_bytes=10)
+    player, _, _, _ = build_player(limited)
+    reservation = await player.reserve_upload(10)
+    assert reservation is not None
+    payload = b"x" * 10
+    started = threading.Event()
+    release = threading.Event()
+
+    def metadata() -> int:
+        started.set()
+        release.wait(timeout=2)
+        return len(payload)
+
+    async def inspect() -> None:
+        with player.observe_upload_work(reservation):
+            await run_blocking(metadata)
+
+    inspection = asyncio.create_task(inspect())
+    assert await asyncio.to_thread(started.wait, 1)
+    inspection.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await inspection
+    await player.release_upload_reservation(reservation)
+
+    with pytest.raises(QueueLimitError):
+        await player.reserve_upload(1)
+
+    release.set()
+    for _ in range(100):
+        try:
+            replacement = await player.reserve_upload(10)
+        except QueueLimitError:
+            await asyncio.sleep(0.01)
+        else:
+            break
+    else:
+        pytest.fail("detached upload reservation was not released")
+    assert replacement is not None
+    await player.release_upload_reservation(replacement)
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_current_and_prefetched_upload_copies_count_toward_memory_limit(
+    app_config,
+) -> None:
+    limited = replace(app_config, max_queued_upload_bytes=24)
+    player, channel, _, _ = build_player(limited)
+    provider = UploadCopyProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    first = make_track("first upload")
+    first.provider_data["upload_size"] = 6
+    first.owned_resource = io.BytesIO(b"a" * 6)
+    second = make_track("second upload")
+    second.provider_data["upload_size"] = 6
+    second.owned_resource = io.BytesIO(b"b" * 6)
+
+    await player.add(first)
+    await player.add(second)
+    for _ in range(100):
+        if player.prepared_next is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    assert player.current_prepared is not None
+    assert player.prepared_next is not None
+    assert player._total_upload_bytes_locked() == 24
+    with pytest.raises(QueueLimitError):
+        await player.reserve_upload(1)
+
+    await player.close()
+    assert not player._prepared_memory_reservations
 
 
 @pytest.mark.asyncio

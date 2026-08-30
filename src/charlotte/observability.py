@@ -21,8 +21,12 @@ import discord
 from charlotte.config import AppConfig
 from charlotte.constants import ERROR_SUPPRESSION_WINDOW, OWNER_DM_TIMEOUT
 
+_SECRET_HEADER_ASSIGNMENT = re.compile(
+    r"(?i)\b(authorization|cookie|set-cookie)\s*=\s*([^\r\n,}]+)"
+)
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)(token|cookie|authorization|password|secret|signature|sig|key|session_id)=([^\s&]+)"
+    r"(?i)\b((?:[a-z0-9]+_)*(?:token|key|secret|password|signature|sig|session_id|verify_key))"
+    r"\s*=\s*([^\s&]+)"
 )
 _SECRET_MAPPING = re.compile(
     r"(?i)(['\"]?(?:token|cookie|authorization|password|secret|signature|sig|key|session_id|verify_key)['\"]?\s*:\s*['\"])([^'\"]+)"
@@ -114,6 +118,9 @@ def redact(value: object, *, secrets: tuple[str, ...] = ()) -> object:
             if secret:
                 scrubbed = scrubbed.replace(secret, "[redacted]")
         scrubbed = _URL.sub(lambda match: redact_url(match.group(0)), scrubbed)
+        scrubbed = _SECRET_HEADER_ASSIGNMENT.sub(
+            lambda match: f"{match.group(1)}=[redacted]", scrubbed
+        )
         scrubbed = _SECRET_ASSIGNMENT.sub(lambda match: f"{match.group(1)}=[redacted]", scrubbed)
         scrubbed = _SECRET_MAPPING.sub(lambda match: f"{match.group(1)}[redacted]", scrubbed)
         scrubbed = _SECRET_HEADER.sub(lambda match: f"{match.group(1)}: [redacted]", scrubbed)

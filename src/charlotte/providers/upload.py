@@ -58,6 +58,9 @@ class UploadProvider:
     def supports_url(self, parsed_url: ParseResult) -> bool:
         return False
 
+    def preparation_memory_bytes(self, track: Track) -> int:
+        return track.upload_size
+
     async def inspect_url(
         self, request: RequestContext, parsed_url: ParseResult, raw_url: str
     ) -> Track:
@@ -142,8 +145,9 @@ class UploadProvider:
                     options=options,
                     stderr=stderr_sink,
                 )
-            except Exception:
+            except BaseException:
                 stderr_sink.close()
+                playback_buffer.close()
                 raise
             return source, stderr_sink
 
@@ -160,12 +164,19 @@ class UploadProvider:
                 create,
                 cleanup_cancelled_result=cleanup_cancelled,
             )
+        except asyncio.CancelledError:
+            # run_blocking owns the still-running constructor and will close the
+            # buffer through cleanup_cancelled once that worker completes.
+            raise
         except BaseException:
             playback_buffer.close()
             raise
         pipe_buffer = _PipeBufferOwner(playback_buffer, source)
         return PreparedAudio(
-            source=source, seekable=True, owned_resources=(pipe_buffer, stderr_sink)
+            source=source,
+            seekable=True,
+            owned_resources=(pipe_buffer, stderr_sink),
+            memory_bytes=track.upload_size,
         )
 
 

@@ -131,6 +131,8 @@ class PreparedAudio:
     source: discord.AudioSource
     seekable: bool
     owned_resources: tuple[Any, ...] = ()
+    memory_bytes: int = 0
+    memory_reservation_id: str | None = None
     _cleanup_controller: _CleanupController = field(init=False, repr=False)
 
     def __post_init__(self) -> None:

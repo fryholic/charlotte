@@ -16,6 +16,7 @@ class SignalAwareBot:
         self.close_calls = 0
         self.token = None
         self.reconnect = None
+        self.health_writer = RecordingHealthWriter()
 
     async def start(self, token, *, reconnect):
         self.token = token
@@ -26,6 +27,14 @@ class SignalAwareBot:
     async def close(self):
         self.close_calls += 1
         self.stopped.set()
+
+
+class RecordingHealthWriter:
+    def __init__(self) -> None:
+        self.marked = False
+
+    def mark_starting(self) -> None:
+        self.marked = True
 
 
 @pytest.mark.asyncio
@@ -54,6 +63,7 @@ async def test_sigterm_requests_graceful_bot_close(monkeypatch) -> None:
     assert bot.reconnect is True
     assert bot.close_calls >= 1
     assert signal.SIGTERM in removed
+    assert bot.health_writer.marked
 
 
 class CloseDoesNotWakeBot:

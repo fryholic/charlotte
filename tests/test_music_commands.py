@@ -3,12 +3,20 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
 
 from charlotte.extensions.music_commands import MusicCommandsCog
-from charlotte.music.models import AddResult, PlayCommitResult, PreparedAudio, RequestContext, Track
+from charlotte.music.models import (
+    AddResult,
+    PlayCommitResult,
+    PreparedAudio,
+    RequestContext,
+    Track,
+    UploadReservation,
+)
 from charlotte.music.player import GuildPlayer
 from charlotte.music.provider import ProviderRegistry
 from tests.fakes import (
@@ -123,6 +131,17 @@ class Providers:
             canonical_url=raw_url,
         )
 
+    async def inspect_upload(self, request: RequestContext, attachment) -> Track:
+        return Track(
+            provider="fake",
+            title=attachment.filename,
+            requester_id=request.requester_id,
+            requester_display_name=request.requester_display_name,
+            request_channel_id=request.text_channel_id,
+            owned_resource=io.BytesIO(b"x" * attachment.size),
+            provider_data={"upload_size": attachment.size},
+        )
+
 
 class CommandPlayer:
     def __init__(self, initial_channel, changed_channel=None) -> None:
@@ -133,6 +152,7 @@ class CommandPlayer:
         self.stopped = False
         self.connected_to = None
         self.added = None
+        self.committed_reservation = None
 
     def issue_receipt(self):
         return 0
@@ -156,18 +176,36 @@ class CommandPlayer:
     async def release_upload_reservation(self, reservation):
         return None
 
-    async def commit_play(self, track, channel, *, access_check):
+    def observe_upload_work(self, reservation):
+        return nullcontext()
+
+    async def commit_play(self, track, channel, *, access_check, upload_reservation=None):
         assert access_check(self.bot_channel)
         self.stopped = self.bot_channel is not None and self.bot_channel != channel
         self.connected_to = channel
         self.bot_channel = channel
         self.added = track
+        self.committed_reservation = upload_reservation
         return PlayCommitResult(
             add_result=AddResult(started=True, queued_position=None),
             moved=True,
             remote_move=self.stopped,
             removed_count=2 if self.stopped else 0,
         )
+
+
+class UploadCommandPlayer(CommandPlayer):
+    def __init__(self, initial_channel) -> None:
+        super().__init__(initial_channel)
+        self.observed_reservation = None
+
+    async def reserve_upload(self, declared_size):
+        return UploadReservation("upload-test", declared_size)
+
+    @contextmanager
+    def observe_upload_work(self, reservation):
+        self.observed_reservation = reservation
+        yield
 
 
 def bot_for(player):
@@ -208,6 +246,27 @@ async def test_play_rechecks_voice_state_before_committing_remote_admin_move() -
     assert player.added is not None
     assert player.finished and not player.cancelled
     assert "채널 이동 후 재생" in ctx.sent[0][0]
+
+
+@pytest.mark.asyncio
+async def test_upload_inspection_and_commit_share_one_memory_reservation() -> None:
+    target = VoiceChannel()
+    player = UploadCommandPlayer(target)
+    bot = bot_for(player)
+    author = SimpleNamespace(
+        id=10,
+        display_name="requester",
+        voice=SimpleNamespace(channel=target),
+        guild_permissions=SimpleNamespace(administrator=False),
+    )
+    attachment = SimpleNamespace(filename="sample.wav", size=6)
+    ctx = Context(author=author, attachments=(attachment,))
+
+    await MusicCommandsCog.play.callback(MusicCommandsCog(bot), ctx)
+
+    assert player.observed_reservation is not None
+    assert player.committed_reservation is player.observed_reservation
+    assert player.added is not None and player.added.upload_size == 6
 
 
 @pytest.mark.asyncio
