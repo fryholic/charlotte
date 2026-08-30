@@ -1,14 +1,19 @@
-# .gitignore
 .env
-downloads/
-__pycache__/
-token.txt
-credentials.json
-.cach
+.env.dev
+config.toml
+config.dev.toml
 
-/deezspot
-
-*.backup
-
-.cache
+.cache/
+.pytest_cache/
+.ruff_cache/
 .venv/
+__pycache__/
+*.py[cod]
+
+coverage.xml
+htmlcov/
+.coverage
+downloads/
+credentials.json
+token.txt
+*.backup

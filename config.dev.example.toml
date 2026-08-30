@@ -1,0 +1,17 @@
+[bot]
+command_prefix = "!"
+operator_user_ids = []
+
+[extensions]
+startup_required = [
+  "music_commands",
+  "youtube_source",
+  "soundcloud_source",
+  "upload_source",
+  "emoji_enlarger",
+]
+startup_optional = []
+
+[emoji]
+enabled = true
+allowed_channel_ids = []
