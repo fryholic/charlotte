@@ -1,0 +1,169 @@
+"""Provider protocol and concurrency-safe runtime registry."""
+
+from __future__ import annotations
+
+import asyncio
+from collections import defaultdict
+from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Protocol
+from urllib.parse import ParseResult
+
+from charlotte.constants import PROVIDER_MAX_CONCURRENCY, PROVIDER_OPERATION_TIMEOUT
+from charlotte.errors import ExtensionOperationError, ProviderError, UnsupportedSourceError
+from charlotte.music.models import PreparedAudio, RequestContext, Track
+
+_detached_work_observer: ContextVar[Callable[[asyncio.Future[None]], None] | None] = ContextVar(
+    "charlotte_detached_work_observer", default=None
+)
+
+
+@contextmanager
+def observe_detached_work(observer: Callable[[asyncio.Future[None]], None]):
+    """Associate detached blocking cleanup with the current guild preparation."""
+
+    token = _detached_work_observer.set(observer)
+    try:
+        yield
+    finally:
+        _detached_work_observer.reset(token)
+
+
+def register_detached_work(completion: asyncio.Future[None]) -> None:
+    observer = _detached_work_observer.get()
+    if observer is not None:
+        observer(completion)
+
+
+class TrackProvider(Protocol):
+    name: str
+    supports_upload: bool
+
+    def supports_url(self, parsed_url: ParseResult) -> bool: ...
+
+    async def inspect_url(
+        self, request: RequestContext, parsed_url: ParseResult, raw_url: str
+    ) -> Track: ...
+
+    async def inspect_upload(self, request: RequestContext, attachment: Any) -> Track: ...
+
+    async def prepare(self, track: Track, *, start_at: float = 0) -> PreparedAudio: ...
+
+
+class ProviderRegistry:
+    def __init__(
+        self,
+        *,
+        max_concurrency: int = PROVIDER_MAX_CONCURRENCY,
+        operation_timeout: float = PROVIDER_OPERATION_TIMEOUT,
+    ) -> None:
+        self._providers: dict[str, TrackProvider] = {}
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._operation_timeout = operation_timeout
+        self._inflight: defaultdict[str, int] = defaultdict(int)
+        self._unloading: set[str] = set()
+
+    @property
+    def names(self) -> frozenset[str]:
+        return frozenset(self._providers)
+
+    def register(self, provider: TrackProvider) -> None:
+        if provider.name in self._providers:
+            raise ExtensionOperationError(f"Provider already registered: {provider.name}")
+        self._unloading.discard(provider.name)
+        self._providers[provider.name] = provider
+
+    def unregister(self, name: str) -> None:
+        if self._inflight[name]:
+            raise ExtensionOperationError(f"Provider has inflight operations: {name}")
+        if self._providers.pop(name, None) is None:
+            raise ExtensionOperationError(f"Provider is not registered: {name}")
+        self._unloading.discard(name)
+
+    def begin_unload(self, name: str) -> None:
+        if name not in self._providers:
+            raise ExtensionOperationError(f"Provider is not registered: {name}")
+        if self._inflight[name]:
+            raise ExtensionOperationError(f"Provider has inflight operations: {name}")
+        self._unloading.add(name)
+
+    def cancel_unload(self, name: str) -> None:
+        self._unloading.discard(name)
+
+    def inflight(self, name: str) -> int:
+        return self._inflight[name]
+
+    def ensure_available(self, name: str) -> None:
+        """Reject a pending inspected Track once its provider starts unloading."""
+
+        if name in self._unloading or name not in self._providers:
+            raise ProviderError(f"Provider is unloading or unavailable: {name}")
+
+    def provider_for_url(self, parsed_url: ParseResult) -> TrackProvider:
+        matches = [
+            provider
+            for provider in self._providers.values()
+            if provider.name not in self._unloading and provider.supports_url(parsed_url)
+        ]
+        if not matches:
+            raise UnsupportedSourceError()
+        if len(matches) > 1:
+            names = ", ".join(sorted(provider.name for provider in matches))
+            raise ExtensionOperationError(f"Provider URL capability collision: {names}")
+        return matches[0]
+
+    def upload_provider(self) -> TrackProvider:
+        matches = [
+            provider
+            for provider in self._providers.values()
+            if provider.name not in self._unloading and provider.supports_upload
+        ]
+        if len(matches) != 1:
+            raise UnsupportedSourceError()
+        return matches[0]
+
+    async def inspect_url(
+        self, request: RequestContext, parsed_url: ParseResult, raw_url: str
+    ) -> Track:
+        provider = self.provider_for_url(parsed_url)
+        return await self._call(
+            provider.name, lambda: provider.inspect_url(request, parsed_url, raw_url)
+        )
+
+    async def inspect_upload(self, request: RequestContext, attachment: Any) -> Track:
+        provider = self.upload_provider()
+        return await self._call(provider.name, lambda: provider.inspect_upload(request, attachment))
+
+    async def prepare(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
+        self.ensure_available(track.provider)
+        provider = self._providers[track.provider]
+        return await self._call(provider.name, lambda: provider.prepare(track, start_at=start_at))
+
+    def preparation_memory_bytes(self, track: Track) -> int:
+        """Return memory a provider will allocate before preparing the source."""
+
+        self.ensure_available(track.provider)
+        provider = self._providers[track.provider]
+        estimator = getattr(provider, "preparation_memory_bytes", None)
+        if estimator is None:
+            return 0
+        estimate = estimator(track)
+        if not isinstance(estimate, int) or isinstance(estimate, bool) or estimate < 0:
+            raise ProviderError(f"Invalid preparation memory estimate: {track.provider}")
+        return estimate
+
+    async def _call(self, name: str, operation: Callable[[], Awaitable[Any]]) -> Any:
+        if name in self._unloading:
+            raise ProviderError(f"Provider is unloading: {name}")
+        self._inflight[name] += 1
+        try:
+            async with asyncio.timeout(self._operation_timeout):
+                async with self._semaphore:
+                    if name in self._unloading or name not in self._providers:
+                        raise ProviderError(f"Provider is unloading: {name}")
+                    return await operation()
+        except TimeoutError as exc:
+            raise ProviderError(f"Provider operation timed out: {name}") from exc
+        finally:
+            self._inflight[name] -= 1

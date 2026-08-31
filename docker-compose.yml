@@ -1,14 +1,25 @@
 services:
   charlotte:
-    build: .
+    build:
+      context: .
+    image: charlotte:production
     container_name: charlotte-bot
+    init: true
     restart: unless-stopped
-    shm_size: '2gb'
-    command: python charlotte_bot.py
+    stop_grace_period: 30s
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+      DEV: "false"
+      CHARLOTTE_CONFIG: /app/config.toml
+      MAX_QUEUE_TRACKS: ${MAX_QUEUE_TRACKS:-0}
+      MAX_QUEUED_UPLOAD_BYTES: ${MAX_QUEUED_UPLOAD_BYTES:-0}
     volumes:
       - type: bind
-        source: .
-        target: /app
-    environment:
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
-      - BLOCKED_USER_IDS=${BLOCKED_USER_IDS}
+        source: ./config.toml
+        target: /app/config.toml
+        read_only: true
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"

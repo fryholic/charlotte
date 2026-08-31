@@ -1,0 +1,251 @@
+"""Discord attachment provider with memory-only probing and playback."""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import os
+from typing import Any
+from urllib.parse import ParseResult
+
+import aiohttp
+import discord
+from mutagen import File as MutagenFile
+
+from charlotte.constants import ATTACHMENT_READ_TIMEOUT
+from charlotte.errors import PlaybackError, QueueLimitError, SourceUnavailableError, UserInputError
+from charlotte.music.models import PreparedAudio, RequestContext, Track
+from charlotte.providers.ytdlp_common import BoundedFFmpegOpusAudio, run_blocking
+
+
+class _InvalidAudio(ValueError):
+    pass
+
+
+class _MemoryFFmpegOpusAudio(BoundedFFmpegOpusAudio):
+    """Silence the benign pipe-close race that discord.py leaves outside its try block."""
+
+    def _pipe_writer(self, source: io.BufferedIOBase) -> None:
+        try:
+            super()._pipe_writer(source)
+        except BrokenPipeError, OSError, ValueError:
+            return
+
+
+class _PipeBufferOwner:
+    def __init__(self, buffer: io.BytesIO, source: discord.FFmpegOpusAudio) -> None:
+        self._buffer = buffer
+        self._source = source
+
+    @property
+    def closed(self) -> bool:
+        return self._buffer.closed
+
+    def close(self) -> None:
+        writer = getattr(self._source, "_pipe_writer_thread", None)
+        if writer is not None and writer.is_alive():
+            writer.join(timeout=5)
+        if writer is not None and writer.is_alive():
+            raise RuntimeError("FFmpeg pipe writer did not stop")
+        self._buffer.close()
+
+
+class UploadProvider:
+    name = "upload"
+    supports_upload = True
+
+    def supports_url(self, parsed_url: ParseResult) -> bool:
+        return False
+
+    def preparation_memory_bytes(self, track: Track) -> int:
+        return track.upload_size
+
+    async def inspect_url(
+        self, request: RequestContext, parsed_url: ParseResult, raw_url: str
+    ) -> Track:
+        raise UserInputError("music.play.invalid_url")
+
+    async def inspect_upload(self, request: RequestContext, attachment: Any) -> Track:
+        declared_size = getattr(attachment, "size", None)
+        read_limit = 0
+        bounded_read = False
+        if request.max_upload_bytes:
+            if not isinstance(declared_size, int) or declared_size < 0:
+                raise QueueLimitError()
+            if declared_size > request.max_upload_bytes:
+                raise QueueLimitError()
+            read_limit = declared_size
+            bounded_read = True
+        try:
+            async with asyncio.timeout(ATTACHMENT_READ_TIMEOUT):
+                url = getattr(attachment, "url", None)
+                if bounded_read and isinstance(url, str) and url:
+                    raw = await _read_cdn_bounded(url, read_limit)
+                else:
+                    raw = await attachment.read()
+        except QueueLimitError:
+            raise
+        except TimeoutError as exc:
+            raise SourceUnavailableError("music.play.attachment_read_failed", str(exc)) from exc
+        except Exception as exc:
+            raise SourceUnavailableError("music.play.attachment_read_failed", str(exc)) from exc
+        if not isinstance(raw, bytes) or not raw:
+            raise UserInputError("music.play.invalid_attachment")
+        if request.max_upload_bytes and len(raw) > request.max_upload_bytes:
+            raise QueueLimitError()
+        if bounded_read and len(raw) != declared_size:
+            raise QueueLimitError()
+
+        try:
+            probe = await _probe(raw)
+        except _InvalidAudio as exc:
+            raise UserInputError("music.play.invalid_attachment") from exc
+        except Exception as exc:
+            raise SourceUnavailableError("music.play.invalid_attachment", str(exc)) from exc
+        title = await run_blocking(lambda: _metadata_title(raw))
+        if not title:
+            tags = probe.get("format", {}).get("tags", {})
+            if isinstance(tags, dict) and isinstance(tags.get("title"), str):
+                title = tags["title"].strip()
+        filename = str(getattr(attachment, "filename", "Unknown audio"))
+        title = title or filename
+        duration = _duration(probe.get("format", {}).get("duration"))
+        return Track(
+            provider=self.name,
+            title=title,
+            requester_id=request.requester_id,
+            requester_display_name=request.requester_display_name,
+            request_channel_id=request.text_channel_id,
+            duration=duration,
+            owned_resource=io.BytesIO(raw),
+            provider_data={
+                "filename": filename,
+                "content_type_hint": getattr(attachment, "content_type", None),
+                "upload_size": len(raw),
+            },
+        )
+
+    async def prepare(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
+        original = track.owned_resource
+        if original is None or original.closed:
+            raise PlaybackError("Upload buffer is unavailable")
+        playback_buffer = io.BytesIO(original.getvalue())
+
+        def create() -> tuple[discord.FFmpegOpusAudio, Any]:
+            options = "-vn -c:a libopus -b:a 320k -ar 48000 -ac 2"
+            if start_at > 0:
+                options = f"-ss {start_at:.3f} {options}"
+            stderr_sink = open(os.devnull, "wb")
+            try:
+                source = _MemoryFFmpegOpusAudio(
+                    playback_buffer,
+                    pipe=True,
+                    before_options="-nostdin",
+                    options=options,
+                    stderr=stderr_sink,
+                )
+            except BaseException:
+                stderr_sink.close()
+                playback_buffer.close()
+                raise
+            return source, stderr_sink
+
+        def cleanup_cancelled(result: tuple[discord.FFmpegOpusAudio, Any]) -> None:
+            source, stderr_sink = result
+            PreparedAudio(
+                source=source,
+                seekable=True,
+                owned_resources=(_PipeBufferOwner(playback_buffer, source), stderr_sink),
+            ).cleanup()
+
+        try:
+            source, stderr_sink = await run_blocking(
+                create,
+                cleanup_cancelled_result=cleanup_cancelled,
+            )
+        except asyncio.CancelledError:
+            # run_blocking owns the still-running constructor and will close the
+            # buffer through cleanup_cancelled once that worker completes.
+            raise
+        except BaseException:
+            playback_buffer.close()
+            raise
+        pipe_buffer = _PipeBufferOwner(playback_buffer, source)
+        return PreparedAudio(
+            source=source,
+            seekable=True,
+            owned_resources=(pipe_buffer, stderr_sink),
+            memory_bytes=track.upload_size,
+        )
+
+
+async def _read_cdn_bounded(url: str, max_bytes: int) -> bytes:
+    timeout = aiohttp.ClientTimeout(total=ATTACHMENT_READ_TIMEOUT)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            content_length = response.content_length
+            if content_length is not None and content_length > max_bytes:
+                raise QueueLimitError()
+            data = bytearray()
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                if len(data) + len(chunk) > max_bytes:
+                    raise QueueLimitError()
+                data.extend(chunk)
+    return bytes(data)
+
+
+async def _probe(raw: bytes) -> dict[str, Any]:
+    process = await asyncio.create_subprocess_exec(
+        "ffprobe",
+        "-v",
+        "error",
+        "-i",
+        "pipe:0",
+        "-show_entries",
+        "stream=codec_type:format=duration:format_tags=title",
+        "-of",
+        "json",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _ = await process.communicate(raw)
+    except asyncio.CancelledError:
+        process.kill()
+        await process.wait()
+        raise
+    if process.returncode != 0:
+        raise _InvalidAudio("ffprobe rejected attachment bytes")
+    parsed = json.loads(stdout.decode("utf-8", errors="replace"))
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("format"), dict):
+        raise _InvalidAudio("ffprobe returned no audio format")
+    streams = parsed.get("streams")
+    if not isinstance(streams, list) or not any(
+        isinstance(stream, dict) and stream.get("codec_type") == "audio" for stream in streams
+    ):
+        raise _InvalidAudio("ffprobe found no audio stream")
+    return parsed
+
+
+def _metadata_title(raw: bytes) -> str | None:
+    try:
+        media = MutagenFile(io.BytesIO(raw), easy=True)
+        if media is None or not media.tags:
+            return None
+        values = media.tags.get("title")
+        if values and isinstance(values[0], str) and values[0].strip():
+            return values[0].strip()
+    except Exception:
+        return None
+    return None
+
+
+def _duration(value: object) -> float | None:
+    try:
+        duration = float(value)  # type: ignore[arg-type]
+    except TypeError, ValueError:
+        return None
+    return duration if duration >= 0 else None
