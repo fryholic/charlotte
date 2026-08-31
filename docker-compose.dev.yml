@@ -1,0 +1,14 @@
+services:
+  charlotte:
+    image: charlotte:development
+    container_name: charlotte-dev-bot
+    environment:
+      DISCORD_TOKEN: ""
+      DISCORD_TOKEN_DEV: ${DISCORD_TOKEN_DEV:-}
+      DEV: "true"
+      CHARLOTTE_CONFIG: /app/config.toml
+    volumes:
+      - type: bind
+        source: ./config.dev.toml
+        target: /app/config.toml
+        read_only: true
