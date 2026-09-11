@@ -164,6 +164,7 @@ async def test_stream_audio_forwards_sanitized_headers_to_ffmpeg(monkeypatch) ->
 @pytest.mark.asyncio
 async def test_ytdlp_pipe_fallback_owns_and_cleans_both_processes(monkeypatch) -> None:
     captured = {}
+    killed_process_groups = []
 
     class Process:
         def __init__(self, command, **kwargs):
@@ -210,7 +211,11 @@ async def test_ytdlp_pipe_fallback_owns_and_cleans_both_processes(monkeypatch) -
         process = Process(command, **kwargs)
         return process
 
+    def killpg(pid, signal_number):
+        killed_process_groups.append((pid, signal_number))
+
     monkeypatch.setattr(ytdlp_common.subprocess, "Popen", popen)
+    monkeypatch.setattr(ytdlp_common.os, "killpg", killpg, raising=False)
     monkeypatch.setattr(ytdlp_common, "BoundedFFmpegOpusAudio", Source)
 
     prepared = await ytdlp_common.stream_ytdlp_audio(
@@ -219,7 +224,11 @@ async def test_ytdlp_pipe_fallback_owns_and_cleans_both_processes(monkeypatch) -
     )
     prepared.cleanup()
 
-    assert process is not None and process.killed
+    assert process is not None
+    if ytdlp_common.os.name == "posix":
+        assert killed_process_groups == [(process.pid, ytdlp_common.signal.SIGKILL)]
+    else:
+        assert process.killed
     assert captured["command"][-2:] == [
         "-",
         "https://www.youtube.com/watch?v=public",
