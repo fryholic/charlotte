@@ -49,7 +49,7 @@ async def test_immediate_youtube_play_reuses_fresh_inspection_descriptor(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_youtube_retry_switches_to_stdout_streaming_fallback(monkeypatch) -> None:
+async def test_youtube_initial_retry_switches_to_stdout_streaming_fallback(monkeypatch) -> None:
     extract = AsyncMock(return_value=metadata())
     fallback = AsyncMock(return_value=PreparedAudio(source=FakeSource(), seekable=True))
     direct = AsyncMock()
@@ -68,14 +68,44 @@ async def test_youtube_retry_switches_to_stdout_streaming_fallback(monkeypatch) 
         failure_retries=1,
     )
 
-    await provider.prepare(track, start_at=12.5)
+    await provider.prepare(track)
 
     fallback.assert_awaited_once_with(
         "https://www.youtube.com/watch?v=public",
-        start_at=12.5,
         expected_duration=3600,
     )
     direct.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_youtube_midstream_retry_seeks_a_fresh_direct_stream(monkeypatch) -> None:
+    extract = AsyncMock(return_value=metadata())
+    fallback = AsyncMock()
+    direct = AsyncMock(return_value=PreparedAudio(source=FakeSource(), seekable=True))
+    monkeypatch.setattr(youtube, "extract", extract)
+    monkeypatch.setattr(youtube, "stream_ytdlp_audio", fallback)
+    monkeypatch.setattr(youtube, "stream_audio", direct)
+    provider = youtube.YouTubeProvider()
+    track = Track(
+        provider="youtube",
+        title="One hour",
+        requester_id=100,
+        requester_display_name="requester",
+        request_channel_id=500,
+        duration=3600,
+        provider_data={"source_url": "https://www.youtube.com/watch?v=public"},
+        failure_retries=1,
+    )
+
+    await provider.prepare(track, start_at=12.5)
+
+    direct.assert_awaited_once_with(
+        "https://media.example/audio?signature=secret",
+        start_at=12.5,
+        headers={"User-Agent": "Charlotte Test"},
+        expected_duration=3600,
+    )
+    fallback.assert_not_awaited()
 
 
 @pytest.mark.asyncio

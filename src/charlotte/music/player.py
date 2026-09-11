@@ -85,9 +85,7 @@ class GuildPlayer:
         self._generation = 0
         self._closed = False
         self._paused = False
-        self._started_at = 0.0
-        self._pause_started_at: float | None = None
-        self._paused_total = 0.0
+        self._playback_start_at = 0.0
         self._prefetch_task: asyncio.Task[None] | None = None
         self._current_prepare_task: asyncio.Task[bool] | None = None
         self._detached_source_cleanup: dict[asyncio.Future[None], str | None] = {}
@@ -494,7 +492,6 @@ class GuildPlayer:
                     return None
                 voice.pause()
                 self._paused = True
-                self._pause_started_at = asyncio.get_running_loop().time()
                 self.log.info(
                     "Track paused",
                     extra={"event": "track.paused", "track_id": self.current.id},
@@ -512,13 +509,8 @@ class GuildPlayer:
                 voice = self._active_voice_client()
                 if voice is None or not voice.is_paused():
                     self._paused = False
-                    self._pause_started_at = None
                     return None
                 voice.resume()
-                now = asyncio.get_running_loop().time()
-                if self._pause_started_at is not None:
-                    self._paused_total += now - self._pause_started_at
-                self._pause_started_at = None
                 self._paused = False
                 self.log.info(
                     "Track resumed",
@@ -584,63 +576,78 @@ class GuildPlayer:
         """Disconnect only if the same connected channel is still empty of humans."""
 
         deferred_cleanup: list[_CleanupBundle] = []
+        stop_error: BaseException | None = None
+        disconnect_error: BaseException | None = None
+        cleanup_error: BaseException | None = None
+        result: StopResult | None = None
+        removed_count = 0
+        recover_track_id: str | None = None
+        should_recover = False
         async with self._connection_lock:
             voice = self._active_voice_client()
             channel = getattr(voice, "channel", None)
             if channel is not expected_channel:
                 return False
-            stop_error: BaseException | None = None
-            result: StopResult | None = None
-            removed_count = 0
-            try:
-                async with self.lock:
-                    voice = self._active_voice_client()
-                    channel = getattr(voice, "channel", None)
-                    members = getattr(channel, "members", ())
-                    if channel is not expected_channel or any(
-                        not getattr(member, "bot", False) for member in members
-                    ):
-                        return False
-                    removed_count = (1 if self.current is not None else 0) + len(self.queue)
-                    result = await self._stop_locked(
-                        still_valid=lambda: (
-                            getattr(self._active_voice_client(), "channel", None)
-                            is expected_channel
-                            and not any(
-                                not getattr(member, "bot", False)
-                                for member in getattr(expected_channel, "members", ())
-                            )
-                        ),
-                        deferred_cleanup=deferred_cleanup,
-                    )
-                    if result is None:
-                        return False
-            except Exception as exc:
-                stop_error = exc
-            voice = self._active_voice_client()
-            if voice is None or getattr(voice, "channel", None) is not expected_channel:
-                if stop_error is not None:
-                    raise stop_error
-                return False
-            disconnect_error: BaseException | None = None
-            cleanup_error: BaseException | None = None
-            try:
+            async with self.lock:
+                voice = self._active_voice_client()
+                channel = getattr(voice, "channel", None)
+                members = getattr(channel, "members", ())
+                if channel is not expected_channel or any(
+                    not getattr(member, "bot", False) for member in members
+                ):
+                    return False
+                recover_track_id = self.current.id if self.current is not None else None
+                removed_count = (1 if self.current is not None else 0) + len(self.queue)
+                # Any callback caused by this disconnect belongs to the old
+                # voice session. A human may join while disconnect() yields;
+                # keep the queue intact until that race has been observed.
+                self._generation += 1
                 disconnect_error = await self._disconnect_current_voice(
                     disconnect_timeout=VOICE_OPERATION_TIMEOUT,
                     event="voice.empty_disconnect_failed",
                 )
-            finally:
-                for cleanup_bundle in deferred_cleanup:
+                if any(
+                    not getattr(member, "bot", False)
+                    for member in getattr(expected_channel, "members", ())
+                ):
+                    should_recover = True
+                else:
                     try:
-                        await self._cleanup_detached(*cleanup_bundle)
-                    except BaseException as exc:
-                        if cleanup_error is None:
-                            cleanup_error = exc
-            for error in (stop_error, disconnect_error, cleanup_error):
-                if error is not None:
-                    raise error
-            if result is None:
-                result = StopResult(removed_count)
+                        result = await self._stop_locked(
+                            still_valid=lambda: (
+                                not any(
+                                    not getattr(member, "bot", False)
+                                    for member in getattr(expected_channel, "members", ())
+                                )
+                            ),
+                            deferred_cleanup=deferred_cleanup,
+                        )
+                        if result is None:
+                            should_recover = True
+                    except Exception as exc:
+                        stop_error = exc
+            for cleanup_bundle in deferred_cleanup:
+                try:
+                    await self._cleanup_detached(*cleanup_bundle)
+                except BaseException as exc:
+                    if cleanup_error is None:
+                        cleanup_error = exc
+
+        if should_recover:
+            if self.has_activity:
+                await self.recover_voice(
+                    expected_channel,
+                    expected_track_id=recover_track_id,
+                )
+            else:
+                await self.connect(expected_channel)
+        for error in (stop_error, disconnect_error, cleanup_error):
+            if error is not None:
+                raise error
+        if should_recover:
+            return False
+        if result is None:
+            result = StopResult(removed_count)
         self.log.info(
             "Voice disconnected from empty channel",
             extra={
@@ -1004,9 +1011,7 @@ class GuildPlayer:
             self.current_prepared = prepared
             track.state = TrackState.PLAYING
             self._paused = False
-            self._started_at = loop.time() - start_at
-            self._paused_total = 0.0
-            self._pause_started_at = None
+            self._playback_start_at = start_at
             self._ensure_prefetch_locked()
             if prepared.confirm_first_packet:
                 self.log.debug(
@@ -1030,7 +1035,6 @@ class GuildPlayer:
                 return
             voice.pause()
             self._paused = True
-            self._pause_started_at = asyncio.get_running_loop().time()
 
     def _schedule_finished(self, track_id: str, generation: int, error: Exception | None) -> None:
         self._spawn(self._on_finished(track_id, generation, error))
@@ -1660,8 +1664,9 @@ class GuildPlayer:
         return error
 
     def _playback_offset_locked(self) -> float:
-        now = self._pause_started_at or asyncio.get_running_loop().time()
-        return max(0.0, now - self._started_at - self._paused_total)
+        prepared = self.current_prepared
+        played = prepared.playback_seconds if prepared is not None else 0.0
+        return max(0.0, self._playback_start_at + played)
 
     async def _cleanup_detached(
         self,

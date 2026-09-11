@@ -90,15 +90,19 @@ class YouTubeProvider:
             descriptor = stream_descriptor(info)
         if descriptor is None:
             raise SourceUnavailableError("music.youtube.unavailable")
-        if track.failure_retries >= 1 and descriptor.protocol in {
-            "http",
-            "https",
-            "m3u8",
-            "m3u8_native",
-        }:
+        if (
+            track.failure_retries >= 1
+            and start_at <= 0
+            and descriptor.protocol
+            in {
+                "http",
+                "https",
+                "m3u8",
+                "m3u8_native",
+            }
+        ):
             return await stream_ytdlp_audio(
                 source_url,
-                start_at=start_at,
                 expected_duration=track.duration,
             )
         return await stream_audio(

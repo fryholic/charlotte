@@ -199,7 +199,9 @@ class RecordingReconnectProvider(FakeProvider):
 
     async def prepare(self, track, *, start_at=0):
         self.start_offsets.append(start_at)
-        return await super().prepare(track, start_at=start_at)
+        prepared = await super().prepare(track, start_at=start_at)
+        prepared._cleanup_controller.source.read = lambda: b"opus"
+        return prepared
 
 
 class PrefetchFailureProvider(FakeProvider):
@@ -242,7 +244,8 @@ class NonRetryableProvider(FakeProvider):
 class FirstPacketProvider(FakeProvider):
     async def prepare(self, track, *, start_at=0):
         source = FakeSource()
-        source.read = lambda: b"opus"  # type: ignore[method-assign]
+        packets = iter((b"OpusHead-version", b"OpusTags-metadata", b"opus"))
+        source.read = lambda: next(packets)  # type: ignore[method-assign]
         self.sources.append(source)
         return PreparedAudio(source=source, seekable=True, confirm_first_packet=True)
 
@@ -656,6 +659,36 @@ async def test_human_join_during_empty_leave_cancels_disconnect(app_config) -> N
     assert not await asyncio.wait_for(leave, 1)
     assert player.bot_channel is channel
     assert player.current is not None and player.current.title == "current"
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_human_join_during_empty_disconnect_recovers_voice_and_playback(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    current = make_track("current")
+    await player.add(current)
+    voice = player.voice_client
+    assert voice is not None
+    original_disconnect = voice.disconnect
+    disconnect_started = asyncio.Event()
+    release_disconnect = asyncio.Event()
+
+    async def delayed_disconnect(*, force=False):
+        disconnect_started.set()
+        await release_disconnect.wait()
+        await original_disconnect(force=force)
+
+    voice.disconnect = delayed_disconnect
+    leaving = asyncio.create_task(player.leave_if_empty(channel))
+    await asyncio.wait_for(disconnect_started.wait(), 1)
+    channel.members.append(SimpleNamespace(bot=False))
+    release_disconnect.set()
+
+    assert not await asyncio.wait_for(leaving, 1)
+    assert player.bot_channel is channel
+    assert player.current is current
+    assert player.current_prepared is not None
     await player.close()
 
 
@@ -1192,7 +1225,8 @@ async def test_playback_retry_resumes_from_observed_offset(app_config) -> None:
     player.providers = providers
     await player.connect(channel)
     await player.add(make_track("current"))
-    player._started_at -= 30
+    for _ in range(1_500):
+        assert channel.guild.voice_client.source.read() == b"opus"
 
     channel.guild.voice_client.finish(RuntimeError("stream failed"))
     for _ in range(100):
@@ -1201,7 +1235,7 @@ async def test_playback_retry_resumes_from_observed_offset(app_config) -> None:
         await asyncio.sleep(0.01)
 
     assert provider.start_offsets[0] == 0
-    assert provider.start_offsets[1] >= 29
+    assert provider.start_offsets[1] == pytest.approx(30)
     await player.close()
 
 
@@ -1233,6 +1267,12 @@ async def test_started_event_waits_for_first_packet(app_config, caplog) -> None:
 
     result = await player.add(make_track("confirmed"))
     assert result.started
+    assert not any(getattr(record, "event", None) == "track.started" for record in caplog.records)
+
+    assert channel.guild.voice_client.source.read().startswith(b"OpusHead")
+    assert channel.guild.voice_client.source.read().startswith(b"OpusTags")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
     assert not any(getattr(record, "event", None) == "track.started" for record in caplog.records)
 
     assert channel.guild.voice_client.source.read() == b"opus"

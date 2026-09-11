@@ -71,21 +71,28 @@ class _CleanupController:
         self._error_reported = False
         self._first_packet_callback: Any | None = None
         self._first_packet_seen = False
+        self._packets_read = 0
 
     def set_first_packet_callback(self, callback: Any) -> None:
         with self._condition:
             self._first_packet_callback = callback
 
     def observe_packet(self, packet: bytes) -> None:
-        if not packet:
+        if not packet or packet.startswith((b"OpusHead", b"OpusTags")):
             return
         callback = None
         with self._condition:
+            self._packets_read += 1
             if not self._first_packet_seen:
                 self._first_packet_seen = True
                 callback = self._first_packet_callback
         if callback is not None:
             callback()
+
+    @property
+    def playback_seconds(self) -> float:
+        with self._condition:
+            return self._packets_read * 0.02
 
     def cleanup(self, *, report_error: bool) -> None:
         owns_cleanup = False
@@ -167,6 +174,10 @@ class PreparedAudio:
 
     def set_first_packet_callback(self, callback: Any) -> None:
         self._cleanup_controller.set_first_packet_callback(callback)
+
+    @property
+    def playback_seconds(self) -> float:
+        return self._cleanup_controller.playback_seconds
 
 
 @dataclass(frozen=True, slots=True)

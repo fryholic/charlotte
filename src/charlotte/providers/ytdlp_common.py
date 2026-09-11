@@ -113,6 +113,11 @@ class BoundedDiagnosticBuffer:
     ) -> None:
         self._max_bytes = max_bytes
         self._secrets = tuple(secret for secret in secrets if secret)
+        secret_overlap = max(
+            (len(secret.encode("utf-8")) for secret in self._secrets),
+            default=0,
+        )
+        self._retained_bytes = max_bytes + secret_overlap
         self._buffer = bytearray()
         self._lock = threading.Lock()
         self.closed = False
@@ -124,7 +129,7 @@ class BoundedDiagnosticBuffer:
             if self.closed:
                 return 0
             self._buffer.extend(data)
-            overflow = len(self._buffer) - self._max_bytes
+            overflow = len(self._buffer) - self._retained_bytes
             if overflow > 0:
                 del self._buffer[:overflow]
         return len(data)
@@ -132,7 +137,9 @@ class BoundedDiagnosticBuffer:
     def tail(self) -> str:
         with self._lock:
             rendered = bytes(self._buffer).decode("utf-8", errors="replace").strip()
-        return str(redact(rendered, secrets=self._secrets))
+        sanitized = str(redact(rendered, secrets=self._secrets))
+        tail = sanitized.encode("utf-8")[-self._max_bytes :]
+        return tail.decode("utf-8", errors="replace")
 
     def close(self) -> None:
         with self._lock:
@@ -422,7 +429,6 @@ async def stream_audio(
 async def stream_ytdlp_audio(
     page_url: str,
     *,
-    start_at: float = 0,
     expected_duration: float | None = None,
 ) -> PreparedAudio:
     """Stream yt-dlp stdout into FFmpeg without buffering the complete media."""
@@ -442,10 +448,8 @@ async def stream_ytdlp_audio(
         str(YTDLP_SOCKET_TIMEOUT),
         "--js-runtimes",
         "node",
-        "--output",
-        "-",
-        page_url,
     ]
+    command.extend(("--output", "-", page_url))
 
     def create() -> tuple[BoundedFFmpegOpusAudio, _YtdlpPipeOwner, BoundedDiagnosticBuffer]:
         diagnostics = BoundedDiagnosticBuffer(secrets=(page_url,))
@@ -475,8 +479,6 @@ async def stream_ytdlp_audio(
         diagnostics_thread.start()
         owner = _YtdlpPipeOwner(process, diagnostics_thread)
         options = "-vn -c:a libopus -b:a 320k -ar 48000 -ac 2"
-        if start_at > 0:
-            options = f"-ss {start_at:.3f} {options}"
         try:
             source = BoundedFFmpegOpusAudio(
                 process.stdout,
@@ -488,7 +490,7 @@ async def stream_ytdlp_audio(
             source.configure_monitoring(
                 diagnostics,
                 expected_duration=expected_duration,
-                start_at=start_at,
+                start_at=0,
             )
             owner.bind_source(source)
         except BaseException:

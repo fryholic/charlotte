@@ -125,6 +125,17 @@ def test_diagnostic_buffer_keeps_only_a_bounded_tail() -> None:
     assert diagnostics.tail() == "23456789"
 
 
+def test_diagnostic_buffer_redacts_a_secret_cut_by_the_tail_boundary() -> None:
+    diagnostics = ytdlp_common.BoundedDiagnosticBuffer(
+        max_bytes=8,
+        secrets=("0123456789",),
+    )
+
+    diagnostics.write(b"prefix-0123456789")
+
+    assert "23456789" not in diagnostics.tail()
+
+
 @pytest.mark.asyncio
 async def test_stream_audio_forwards_sanitized_headers_to_ffmpeg(monkeypatch) -> None:
     captured = {}
@@ -234,3 +245,4 @@ async def test_ytdlp_pipe_fallback_owns_and_cleans_both_processes(monkeypatch) -
         "https://www.youtube.com/watch?v=public",
     ]
     assert captured["ffmpeg_kwargs"]["pipe"] is True
+    assert "-ss" not in captured["ffmpeg_kwargs"]["options"]
