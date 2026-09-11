@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import discord
 from discord.ext import commands
 
+from charlotte.constants import VOICE_EMPTY_RECHECK_DELAY
 from charlotte.errors import (
     AccessDeniedError,
     ExtensionOperationError,
@@ -32,6 +33,12 @@ EXTENSION_META = ExtensionMetadata(
 class MusicCommandsCog(commands.Cog):
     def __init__(self, bot) -> None:
         self.bot = bot
+        self._empty_rechecks: dict[int, asyncio.Task[None]] = {}
+
+    def cog_unload(self) -> None:
+        for task in self._empty_rechecks.values():
+            task.cancel()
+        self._empty_rechecks.clear()
 
     @commands.command(name="play")
     @commands.guild_only()
@@ -390,6 +397,42 @@ class MusicCommandsCog(commands.Cog):
         channel = player.bot_channel
         if channel is not None and not any(not item.bot for item in channel.members):
             await player.leave_if_empty(channel)
+            return
+        if (
+            channel is not None
+            and before.channel is channel
+            and after.channel is not channel
+            and not member.bot
+        ):
+            self._schedule_empty_recheck(member.guild.id, channel)
+
+    def _schedule_empty_recheck(self, guild_id: int, channel) -> None:
+        previous = self._empty_rechecks.get(guild_id)
+        if previous is not None:
+            previous.cancel()
+        task = asyncio.create_task(self._delayed_empty_recheck(guild_id, channel))
+        self._empty_rechecks[guild_id] = task
+
+        def done(completed: asyncio.Task[None]) -> None:
+            if self._empty_rechecks.get(guild_id) is completed:
+                self._empty_rechecks.pop(guild_id, None)
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(done)
+
+    async def _delayed_empty_recheck(self, guild_id: int, channel) -> None:
+        await asyncio.sleep(VOICE_EMPTY_RECHECK_DELAY)
+        try:
+            player = self.bot.players.peek(guild_id)
+            if player is not None:
+                await player.leave_if_empty(channel)
+        except Exception as error:
+            await self.bot.reporter.report(
+                error,
+                event="voice.empty_recheck_failed",
+                context=ErrorContext(guild_id=guild_id, channel_id=getattr(channel, "id", None)),
+            )
 
     async def _control_allowed(self, ctx: commands.Context, player) -> bool:
         decision = decide_control(ctx.author, player.bot_channel, self.bot.config.operator_user_ids)

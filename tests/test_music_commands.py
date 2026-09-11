@@ -119,6 +119,9 @@ class Players:
     async def get(self, guild_id):
         return self.player
 
+    def peek(self, guild_id):
+        return self.player
+
 
 class Providers:
     async def inspect_url(self, request: RequestContext, parsed_url, raw_url) -> Track:
@@ -353,3 +356,43 @@ async def test_help_uses_the_instance_prefix_and_hides_operator_commands() -> No
     content = ctx.sent[0][0]
     assert "!play" in content
     assert "extension" not in content
+
+
+@pytest.mark.asyncio
+async def test_voice_leave_schedules_a_delayed_empty_recheck(monkeypatch) -> None:
+    channel = SimpleNamespace(id=600, members=[])
+    human = SimpleNamespace(id=10, bot=False)
+    channel.members.append(human)
+
+    class Player:
+        bot_channel = channel
+
+        def __init__(self):
+            self.checks = 0
+
+        async def leave_if_empty(self, expected_channel):
+            assert expected_channel is channel
+            self.checks += 1
+            return not expected_channel.members
+
+    player = Player()
+    bot = bot_for(player)
+    bot.user = SimpleNamespace(id=999)
+    member = SimpleNamespace(id=human.id, bot=False, guild=SimpleNamespace(id=1))
+    before = SimpleNamespace(channel=channel)
+    after = SimpleNamespace(channel=None)
+    monkeypatch.setattr(
+        "charlotte.extensions.music_commands.VOICE_EMPTY_RECHECK_DELAY",
+        0,
+    )
+    cog = MusicCommandsCog(bot)
+
+    await cog.on_voice_state_update(member, before, after)
+    recheck = cog._empty_rechecks[1]
+    channel.members.clear()
+    await recheck
+    await asyncio.sleep(0)
+
+    assert player.checks == 1
+    assert not cog._empty_rechecks
+    cog.cog_unload()

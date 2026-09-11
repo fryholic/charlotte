@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from urllib.parse import ParseResult, parse_qs, urlencode, urlunparse
 
-from charlotte.errors import SourceUnavailableError, UnsupportedContentError, UserInputError
+from charlotte.constants import STREAM_DESCRIPTOR_MAX_AGE
+from charlotte.errors import (
+    NonRetryableSourceError,
+    SourceUnavailableError,
+    UnsupportedContentError,
+    UserInputError,
+)
 from charlotte.music.models import PreparedAudio, RequestContext, Track
-from charlotte.providers.ytdlp_common import YtdlpError, extract, first_entry, stream_audio
+from charlotte.providers.ytdlp_common import (
+    StreamDescriptor,
+    YtdlpError,
+    extract,
+    first_entry,
+    non_retryable_ytdlp_error,
+    stream_audio,
+    stream_descriptor,
+    stream_ytdlp_audio,
+)
 
 _YOUTUBE_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
 
@@ -27,7 +43,7 @@ class YouTubeProvider:
             data = await extract(normalized, playlist=playlist)
         except YtdlpError as exc:
             message_id = "music.youtube.empty_playlist" if playlist else "music.youtube.unavailable"
-            raise SourceUnavailableError(message_id, str(exc)) from exc
+            raise _unavailable(message_id, exc) from exc
         info = first_entry(data)
         if info is None:
             raise SourceUnavailableError("music.youtube.empty_playlist")
@@ -39,6 +55,7 @@ class YouTubeProvider:
         if not isinstance(canonical, str) or not isinstance(title, str) or not title.strip():
             raise SourceUnavailableError("music.youtube.unavailable")
         duration = _duration(info.get("duration"))
+        descriptor = stream_descriptor(info)
         return Track(
             provider=self.name,
             title=title.strip(),
@@ -48,6 +65,8 @@ class YouTubeProvider:
             canonical_url=canonical,
             duration=duration,
             provider_data={"source_url": canonical},
+            playback_hint=descriptor,
+            prefetchable=False,
         )
 
     async def inspect_upload(self, request: RequestContext, attachment: Any) -> Track:
@@ -55,18 +74,46 @@ class YouTubeProvider:
 
     async def prepare(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
         source_url = str(track.provider_data["source_url"])
-        try:
-            data = await extract(source_url, playlist=False)
-        except YtdlpError as exc:
-            raise SourceUnavailableError("music.youtube.unavailable", str(exc)) from exc
-        info = first_entry(data)
-        if info is None:
+        descriptor = track.playback_hint
+        track.playback_hint = None
+        if not isinstance(descriptor, StreamDescriptor) or (
+            time.monotonic() - descriptor.extracted_at > STREAM_DESCRIPTOR_MAX_AGE
+        ):
+            try:
+                data = await extract(source_url, playlist=False)
+            except YtdlpError as exc:
+                raise _unavailable("music.youtube.unavailable", exc) from exc
+            info = first_entry(data)
+            if info is None:
+                raise SourceUnavailableError("music.youtube.unavailable")
+            _reject_live(info)
+            descriptor = stream_descriptor(info)
+        if descriptor is None:
             raise SourceUnavailableError("music.youtube.unavailable")
-        _reject_live(info)
-        direct_url = info.get("url")
-        if not isinstance(direct_url, str) or not direct_url:
-            raise SourceUnavailableError("music.youtube.unavailable")
-        return await stream_audio(direct_url, start_at=start_at)
+        if track.failure_retries >= 1 and descriptor.protocol in {
+            "http",
+            "https",
+            "m3u8",
+            "m3u8_native",
+        }:
+            return await stream_ytdlp_audio(
+                source_url,
+                start_at=start_at,
+                expected_duration=track.duration,
+            )
+        return await stream_audio(
+            descriptor.url,
+            start_at=start_at,
+            headers=descriptor.headers,
+            expected_duration=track.duration,
+        )
+
+
+def _unavailable(message_id: str, error: YtdlpError) -> SourceUnavailableError:
+    error_type = (
+        NonRetryableSourceError if non_retryable_ytdlp_error(error) else SourceUnavailableError
+    )
+    return error_type(message_id, str(error))
 
 
 def _normalize(parsed: ParseResult) -> tuple[str, bool]:

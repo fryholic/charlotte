@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
 
+import discord
 import pytest
 
 from charlotte.errors import (
     AccessDeniedError,
+    NonRetryableSourceError,
     PlaybackError,
     ProviderError,
     QueueLimitError,
@@ -226,6 +229,24 @@ class FailingPreparedCleanupProvider(FakeProvider):
         return PreparedAudio(source=FailingCleanupSource(), seekable=True)
 
 
+class NonRetryableProvider(FakeProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_calls = 0
+
+    async def prepare(self, track, *, start_at=0):
+        self.prepare_calls += 1
+        raise NonRetryableSourceError("music.youtube.unavailable", "bot challenge")
+
+
+class FirstPacketProvider(FakeProvider):
+    async def prepare(self, track, *, start_at=0):
+        source = FakeSource()
+        source.read = lambda: b"opus"  # type: ignore[method-assign]
+        self.sources.append(source)
+        return PreparedAudio(source=source, seekable=True, confirm_first_packet=True)
+
+
 class UploadCopyProvider(FakeProvider):
     def preparation_memory_bytes(self, track) -> int:
         return track.upload_size
@@ -303,6 +324,26 @@ class AdvancingReconnectChannel(FakeVoiceChannel):
         voice = await super().connect(timeout=timeout, reconnect=reconnect)
         await self.player._advance()
         return voice
+
+
+class ConnectRaceChannel(FakeVoiceChannel):
+    async def connect(self, *, timeout, reconnect):  # noqa: ASYNC109
+        candidate = FakeVoiceClient(self)
+        self.guild.voice_client = candidate
+        raise discord.ClientException("Already connected to a voice channel.")
+
+
+class StuckStaleVoice(FakeVoiceClient):
+    def __init__(self, channel) -> None:
+        super().__init__(channel)
+        self.connected = False
+        self.cleaned = False
+
+    async def disconnect(self, *, force=False):
+        await asyncio.Event().wait()
+
+    def cleanup(self) -> None:
+        self.cleaned = True
 
 
 def build_player(app_config, guild_id=1, *, provider_delay=0):
@@ -507,6 +548,50 @@ async def test_cancelled_connect_cleans_cache_before_consecutive_connect(app_con
 
 
 @pytest.mark.asyncio
+async def test_stale_cached_voice_is_cleared_before_first_connect(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    stale = FakeVoiceClient(channel)
+    stale.connected = False
+    channel.guild.voice_client = stale
+    player.voice_client = stale
+
+    assert not await player.connect(channel)
+
+    assert channel.guild.voice_client is player.voice_client
+    assert player.voice_client is not stale
+    assert player.bot_channel is channel
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_connect_race_adopts_the_active_guild_voice_client(app_config) -> None:
+    player, original_channel, _, _ = build_player(app_config)
+    channel = ConnectRaceChannel(original_channel.guild, 99, "race")
+
+    assert not await player.connect(channel)
+
+    assert player.voice_client is channel.guild.voice_client
+    assert player.bot_channel is channel
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_stale_cleanup_timeout_is_bounded_and_cache_local(app_config, monkeypatch) -> None:
+    player, channel, _, _ = build_player(app_config)
+    stale = StuckStaleVoice(channel)
+    channel.guild.voice_client = stale
+    player.voice_client = stale
+    monkeypatch.setattr("charlotte.music.player.STALE_VOICE_CLEANUP_TIMEOUT", 0.01)
+
+    await asyncio.wait_for(player.connect(channel), 0.5)
+
+    assert stale.cleaned
+    assert player.voice_client is channel.guild.voice_client
+    assert player.voice_client is not stale
+    await player.close()
+
+
+@pytest.mark.asyncio
 async def test_failed_move_disconnects_uncertain_voice_before_reconnect(
     app_config, monkeypatch
 ) -> None:
@@ -571,6 +656,71 @@ async def test_human_join_during_empty_leave_cancels_disconnect(app_config) -> N
     assert not await asyncio.wait_for(leave, 1)
     assert player.bot_channel is channel
     assert player.current is not None and player.current.title == "current"
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_empty_disconnect_checks_are_idempotent(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    await player.add(make_track("current"))
+
+    first, second = await asyncio.gather(
+        player.leave_if_empty(channel),
+        player.leave_if_empty(channel),
+    )
+
+    assert sorted((first, second)) == [False, True]
+    assert channel.guild.voice_client is None
+    assert player.current is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_disconnects_a_missed_empty_channel(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    await player.add(make_track("current"))
+
+    assert await player.reconcile_voice_state()
+
+    assert channel.guild.voice_client is None
+    assert player.current is None
+
+
+@pytest.mark.asyncio
+async def test_leave_disconnects_even_when_source_cleanup_fails(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = FailingPreparedCleanupProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    voice = player.voice_client
+    await player.add(make_track("current"))
+
+    with pytest.raises(ResourceCleanupError):
+        await player.leave()
+
+    assert voice is not None and not voice.is_connected()
+    assert channel.guild.voice_client is None
+    assert player.voice_client is None
+
+
+@pytest.mark.asyncio
+async def test_non_prefetchable_url_track_waits_until_playback(app_config) -> None:
+    player, channel, provider, _ = build_player(app_config)
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    queued = make_track("queued-url")
+    queued.prefetchable = False
+    queued.playback_hint = object()
+
+    await player.add(queued)
+    await asyncio.sleep(0.02)
+
+    assert provider.sources == [provider.sources[0]]
+    assert queued.playback_hint is None
+    assert player.prepared_next is None
     await player.close()
 
 
@@ -1030,6 +1180,66 @@ async def test_playback_callback_error_retries_same_track_only_once(app_config) 
     assert current.state.value == "disposed"
     assert any(event == "music.playback.failed" for _, event, _, _ in reporter.reports)
     assert provider.max_live_sources <= 2
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_playback_retry_resumes_from_observed_offset(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = RecordingReconnectProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    player._started_at -= 30
+
+    channel.guild.voice_client.finish(RuntimeError("stream failed"))
+    for _ in range(100):
+        if len(provider.start_offsets) == 2 and channel.guild.voice_client.is_playing():
+            break
+        await asyncio.sleep(0.01)
+
+    assert provider.start_offsets[0] == 0
+    assert provider.start_offsets[1] >= 29
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_source_error_is_not_repeated(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    provider = NonRetryableProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    assert not (await player.add(make_track("blocked"))).started
+
+    assert provider.prepare_calls == 1
+    assert player.current is None
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_started_event_waits_for_first_packet(app_config, caplog) -> None:
+    caplog.set_level(logging.INFO)
+    player, channel, _, _ = build_player(app_config)
+    provider = FirstPacketProvider()
+    providers = ProviderRegistry()
+    providers.register(provider)
+    player.providers = providers
+    await player.connect(channel)
+
+    result = await player.add(make_track("confirmed"))
+    assert result.started
+    assert not any(getattr(record, "event", None) == "track.started" for record in caplog.records)
+
+    assert channel.guild.voice_client.source.read() == b"opus"
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert any(getattr(record, "event", None) == "track.started" for record in caplog.records)
     await player.close()
 
 

@@ -54,6 +54,17 @@ async def test_ready_retries_transient_owner_lookup_failure(app_config) -> None:
     await bot.close()
 
 
+@pytest.mark.asyncio
+async def test_resumed_reconciles_player_voice_states(app_config) -> None:
+    bot = create_bot(app_config)
+    bot.players.reconcile_voice_states = AsyncMock()
+
+    await bot.on_resumed()
+
+    bot.players.reconcile_voice_states.assert_awaited_once_with()
+    await bot.close()
+
+
 def test_internal_shutdown_budgets_fit_docker_grace_period() -> None:
     assert SHUTDOWN_AUXILIARY_TIMEOUT * 2 + SHUTDOWN_PLAYERS_TIMEOUT + SHUTDOWN_DISCORD_TIMEOUT < 30
     assert SHUTDOWN_VOICE_TIMEOUT + SHUTDOWN_DETACHED_CLEANUP_TIMEOUT <= (SHUTDOWN_PLAYERS_TIMEOUT)

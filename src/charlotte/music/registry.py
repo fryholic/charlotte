@@ -59,6 +59,24 @@ class PlayerRegistry:
     def any_activity(self) -> bool:
         return any(player.has_activity for player in self._players.values())
 
+    async def reconcile_voice_states(self) -> None:
+        """Reconcile cached voice state after ready/resume event gaps."""
+
+        async with self._lock:
+            players = list(self._players.values())
+        results = await asyncio.gather(
+            *(player.reconcile_voice_state() for player in players),
+            return_exceptions=True,
+        )
+        for player, result in zip(players, results, strict=True):
+            if isinstance(result, BaseException):
+                log_exception(
+                    self.log,
+                    result,
+                    event="voice.reconcile_failed",
+                    context={"guild_id": player.guild_id},
+                )
+
     async def remove(self, guild_id: int) -> None:
         async with self._lock:
             player = self._players.pop(guild_id, None)
