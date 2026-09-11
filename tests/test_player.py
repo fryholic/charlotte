@@ -693,6 +693,84 @@ async def test_human_join_during_empty_disconnect_recovers_voice_and_playback(ap
 
 
 @pytest.mark.asyncio
+async def test_empty_disconnect_recovery_precedes_waiting_play_commit(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    current = make_track("current")
+    await player.add(current)
+    voice = player.voice_client
+    assert voice is not None
+    original_disconnect = voice.disconnect
+    disconnect_started = asyncio.Event()
+    release_disconnect = asyncio.Event()
+
+    async def delayed_disconnect(*, force=False):
+        disconnect_started.set()
+        await release_disconnect.wait()
+        await original_disconnect(force=force)
+
+    voice.disconnect = delayed_disconnect
+    leaving = asyncio.create_task(player.leave_if_empty(channel))
+    await asyncio.wait_for(disconnect_started.wait(), 1)
+    channel.members.append(SimpleNamespace(bot=False))
+    queued = make_track("queued")
+    committing = asyncio.create_task(
+        player.commit_play(queued, channel, access_check=lambda _: True)
+    )
+    await asyncio.sleep(0)
+    assert not committing.done()
+    release_disconnect.set()
+
+    assert not await asyncio.wait_for(leaving, 1)
+    await asyncio.wait_for(committing, 1)
+    assert player.current is current
+    assert list(player.queue) == [queued]
+    assert player.voice_client is not None and player.voice_client.is_playing()
+    await player.close()
+
+
+@pytest.mark.asyncio
+async def test_empty_disconnect_recovery_aborts_if_last_human_leaves(app_config) -> None:
+    player, channel, _, _ = build_player(app_config)
+    await player.connect(channel)
+    await player.add(make_track("current"))
+    voice = player.voice_client
+    assert voice is not None
+    original_disconnect = voice.disconnect
+    original_connect = channel.connect
+    disconnect_started = asyncio.Event()
+    release_disconnect = asyncio.Event()
+    reconnect_started = asyncio.Event()
+    release_reconnect = asyncio.Event()
+
+    async def delayed_disconnect(*, force=False):
+        disconnect_started.set()
+        await release_disconnect.wait()
+        await original_disconnect(force=force)
+
+    async def delayed_connect(*, timeout, reconnect):  # noqa: ASYNC109
+        reconnect_started.set()
+        await release_reconnect.wait()
+        return await original_connect(timeout=timeout, reconnect=reconnect)
+
+    voice.disconnect = delayed_disconnect
+    channel.connect = delayed_connect
+    leaving = asyncio.create_task(player.leave_if_empty(channel))
+    await asyncio.wait_for(disconnect_started.wait(), 1)
+    human = SimpleNamespace(bot=False)
+    channel.members.append(human)
+    release_disconnect.set()
+    await asyncio.wait_for(reconnect_started.wait(), 1)
+    channel.members.remove(human)
+    release_reconnect.set()
+
+    assert await asyncio.wait_for(leaving, 1)
+    assert channel.guild.voice_client is None
+    assert player.voice_client is None
+    assert player.current is None
+
+
+@pytest.mark.asyncio
 async def test_duplicate_empty_disconnect_checks_are_idempotent(app_config) -> None:
     player, channel, _, _ = build_player(app_config)
     await player.connect(channel)

@@ -6,8 +6,8 @@ import asyncio
 import logging
 import uuid
 from collections import deque
-from collections.abc import Callable
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 import discord
@@ -51,6 +51,15 @@ type _CleanupBundle = tuple[
     list[Track],
     PreparedAudio | None,
 ]
+
+
+@asynccontextmanager
+async def _optional_lock(lock: asyncio.Lock, *, already_held: bool) -> AsyncIterator[None]:
+    if already_held:
+        yield
+        return
+    async with lock:
+        yield
 
 
 class GuildPlayer:
@@ -626,6 +635,43 @@ class GuildPlayer:
                             should_recover = True
                     except Exception as exc:
                         stop_error = exc
+            if should_recover:
+
+                def humans_remain() -> bool:
+                    return any(
+                        not getattr(member, "bot", False)
+                        for member in getattr(expected_channel, "members", ())
+                    )
+
+                if self.has_activity:
+                    recovery_valid = await self.recover_voice(
+                        expected_channel,
+                        expected_track_id=recover_track_id,
+                        _connection_lock_held=True,
+                        _still_valid=humans_remain,
+                    )
+                else:
+                    recovery_valid = False
+                    if humans_remain():
+                        await self._connect_locked(expected_channel)
+                        recovery_valid = humans_remain()
+                        if not recovery_valid:
+                            second_disconnect_error = await self._disconnect_current_voice(
+                                disconnect_timeout=VOICE_OPERATION_TIMEOUT,
+                                event="voice.empty_recovery_disconnect_failed",
+                            )
+                            if disconnect_error is None:
+                                disconnect_error = second_disconnect_error
+                if not recovery_valid and not humans_remain():
+                    async with self.lock:
+                        try:
+                            result = await self._stop_locked(
+                                still_valid=lambda: not humans_remain(),
+                                deferred_cleanup=deferred_cleanup,
+                            )
+                            should_recover = result is None
+                        except Exception as exc:
+                            stop_error = exc
             for cleanup_bundle in deferred_cleanup:
                 try:
                     await self._cleanup_detached(*cleanup_bundle)
@@ -633,14 +679,6 @@ class GuildPlayer:
                     if cleanup_error is None:
                         cleanup_error = exc
 
-        if should_recover:
-            if self.has_activity:
-                await self.recover_voice(
-                    expected_channel,
-                    expected_track_id=recover_track_id,
-                )
-            else:
-                await self.connect(expected_channel)
         for error in (stop_error, disconnect_error, cleanup_error):
             if error is not None:
                 raise error
@@ -752,24 +790,34 @@ class GuildPlayer:
             await self._drain_source_cleanup()
 
     async def recover_voice(
-        self, channel: discord.abc.Connectable, *, expected_track_id: str | None
-    ) -> None:
+        self,
+        channel: discord.abc.Connectable,
+        *,
+        expected_track_id: str | None,
+        _connection_lock_held: bool = False,
+        _still_valid: Callable[[], bool] | None = None,
+    ) -> bool:
         last_error: BaseException | None = None
         notification: str | None = None
         report_error = False
         advance_queue = False
         recovery_gate = False
-        async with self._connection_lock:
+        async with _optional_lock(
+            self._connection_lock,
+            already_held=_connection_lock_held,
+        ):
+            if _still_valid is not None and not _still_valid():
+                return False
             if self._active_voice_client() is not None:
-                return
+                return True
             async with self.lock:
                 track = self.current
                 queue_only = track is None
                 if self._closed:
-                    return
+                    return False
                 if queue_only:
                     if expected_track_id is not None or not self.queue:
-                        return
+                        return False
                     track = self.queue[0]
                     preparing = False
                     previous = None
@@ -778,7 +826,7 @@ class GuildPlayer:
                     was_paused = False
                 else:
                     if track.id != expected_track_id:
-                        return
+                        return False
                     preparing = track.state is TrackState.PREPARING
                     await self._cancel_current_prepare_locked()
                     await self._cancel_prefetch_locked(track_id=track.id)
@@ -830,12 +878,14 @@ class GuildPlayer:
                             and self.queue[0] is track
                             and self._generation == generation
                             and not self._closed
+                            and (_still_valid is None or _still_valid())
                         )
                     else:
                         valid = (
                             self.current is track
                             and self._generation == generation
                             and not self._closed
+                            and (_still_valid is None or _still_valid())
                         )
                     if valid:
                         self.voice_client = candidate
@@ -846,7 +896,7 @@ class GuildPlayer:
                         await self._cleanup_failed_voice_connection(
                             getattr(channel, "guild", None), candidate
                         )
-                    return
+                    return False
 
                 if self._active_voice_client() is None:
                     if not queue_only:
@@ -886,6 +936,7 @@ class GuildPlayer:
             await self._notify(track.request_channel_id, notification)
         if report_error and last_error is not None:
             await self._report(last_error, "music.voice.reconnect_failed", track)
+        return True
 
     async def _prepare_current(
         self,
