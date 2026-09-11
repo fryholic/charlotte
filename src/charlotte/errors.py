@@ -38,6 +38,10 @@ class SourceUnavailableError(CharlotteError):
         super().__init__(detail or message_id)
 
 
+class NonRetryableSourceError(SourceUnavailableError):
+    """A remote source failure that repeating immediately cannot resolve."""
+
+
 class ProviderError(CharlotteError):
     pass
 

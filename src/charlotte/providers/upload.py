@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import os
 from typing import Any
 from urllib.parse import ParseResult
 
@@ -16,7 +15,11 @@ from mutagen import File as MutagenFile
 from charlotte.constants import ATTACHMENT_READ_TIMEOUT
 from charlotte.errors import PlaybackError, QueueLimitError, SourceUnavailableError, UserInputError
 from charlotte.music.models import PreparedAudio, RequestContext, Track
-from charlotte.providers.ytdlp_common import BoundedFFmpegOpusAudio, run_blocking
+from charlotte.providers.ytdlp_common import (
+    BoundedDiagnosticBuffer,
+    BoundedFFmpegOpusAudio,
+    run_blocking,
+)
 
 
 class _InvalidAudio(ValueError):
@@ -136,7 +139,7 @@ class UploadProvider:
             options = "-vn -c:a libopus -b:a 320k -ar 48000 -ac 2"
             if start_at > 0:
                 options = f"-ss {start_at:.3f} {options}"
-            stderr_sink = open(os.devnull, "wb")
+            stderr_sink = BoundedDiagnosticBuffer()
             try:
                 source = _MemoryFFmpegOpusAudio(
                     playback_buffer,
@@ -144,6 +147,11 @@ class UploadProvider:
                     before_options="-nostdin",
                     options=options,
                     stderr=stderr_sink,
+                )
+                source.configure_monitoring(
+                    stderr_sink,
+                    expected_duration=track.duration,
+                    start_at=start_at,
                 )
             except BaseException:
                 stderr_sink.close()
@@ -177,6 +185,7 @@ class UploadProvider:
             seekable=True,
             owned_resources=(pipe_buffer, stderr_sink),
             memory_bytes=track.upload_size,
+            confirm_first_packet=True,
         )
 
 

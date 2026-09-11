@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from urllib.parse import ParseResult, urlunparse
 
+from charlotte.constants import STREAM_DESCRIPTOR_MAX_AGE
 from charlotte.errors import SourceUnavailableError, UnsupportedContentError, UserInputError
 from charlotte.music.models import PreparedAudio, RequestContext, Track
-from charlotte.providers.ytdlp_common import YtdlpError, extract, stream_audio
+from charlotte.providers.ytdlp_common import (
+    StreamDescriptor,
+    YtdlpError,
+    extract,
+    stream_audio,
+    stream_descriptor,
+)
 
 _SOUNDCLOUD_HOSTS = {
     "soundcloud.com",
@@ -48,6 +56,7 @@ class SoundCloudProvider:
             and duration >= 0
             else None
         )
+        descriptor = stream_descriptor(data)
         return Track(
             provider=self.name,
             title=title.strip(),
@@ -57,6 +66,8 @@ class SoundCloudProvider:
             canonical_url=canonical,
             duration=reliable_duration,
             provider_data={"source_url": canonical},
+            playback_hint=descriptor,
+            prefetchable=False,
         )
 
     async def inspect_upload(self, request: RequestContext, attachment: Any) -> Track:
@@ -64,15 +75,25 @@ class SoundCloudProvider:
 
     async def prepare(self, track: Track, *, start_at: float = 0) -> PreparedAudio:
         source_url = str(track.provider_data["source_url"])
-        try:
-            data = await extract(source_url, playlist=False)
-        except YtdlpError as exc:
-            raise SourceUnavailableError("music.soundcloud.unavailable", str(exc)) from exc
-        _require_single_track(data)
-        direct_url = data.get("url")
-        if not isinstance(direct_url, str) or not direct_url:
+        descriptor = track.playback_hint
+        track.playback_hint = None
+        if not isinstance(descriptor, StreamDescriptor) or (
+            time.monotonic() - descriptor.extracted_at > STREAM_DESCRIPTOR_MAX_AGE
+        ):
+            try:
+                data = await extract(source_url, playlist=False)
+            except YtdlpError as exc:
+                raise SourceUnavailableError("music.soundcloud.unavailable", str(exc)) from exc
+            _require_single_track(data)
+            descriptor = stream_descriptor(data)
+        if descriptor is None:
             raise SourceUnavailableError("music.soundcloud.unavailable")
-        return await stream_audio(direct_url, start_at=start_at)
+        return await stream_audio(
+            descriptor.url,
+            start_at=start_at,
+            headers=descriptor.headers,
+            expected_duration=track.duration,
+        )
 
 
 def _normalize(parsed: ParseResult) -> str:

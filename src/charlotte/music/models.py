@@ -38,6 +38,8 @@ class Track:
     canonical_url: str | None = None
     duration: float | None = None
     provider_data: dict[str, Any] = field(default_factory=dict)
+    playback_hint: Any | None = field(default=None, repr=False)
+    prefetchable: bool = True
     owned_resource: io.BytesIO | None = None
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
     state: TrackState = TrackState.QUEUED
@@ -51,6 +53,7 @@ class Track:
         if self.state is TrackState.DISPOSED:
             return
         self.state = TrackState.DISPOSED
+        self.playback_hint = None
         if self.owned_resource is not None and not self.owned_resource.closed:
             self.owned_resource.close()
 
@@ -66,6 +69,30 @@ class _CleanupController:
         self._cleaned = False
         self._error: BaseException | None = None
         self._error_reported = False
+        self._first_packet_callback: Any | None = None
+        self._first_packet_seen = False
+        self._packets_read = 0
+
+    def set_first_packet_callback(self, callback: Any) -> None:
+        with self._condition:
+            self._first_packet_callback = callback
+
+    def observe_packet(self, packet: bytes) -> None:
+        if not packet or packet.startswith((b"OpusHead", b"OpusTags")):
+            return
+        callback = None
+        with self._condition:
+            self._packets_read += 1
+            if not self._first_packet_seen:
+                self._first_packet_seen = True
+                callback = self._first_packet_callback
+        if callback is not None:
+            callback()
+
+    @property
+    def playback_seconds(self) -> float:
+        with self._condition:
+            return self._packets_read * 0.02
 
     def cleanup(self, *, report_error: bool) -> None:
         owns_cleanup = False
@@ -112,7 +139,9 @@ class _ManagedAudioSource(discord.AudioSource):
         self._controller = controller
 
     def read(self) -> bytes:
-        return self._controller.source.read()
+        packet = self._controller.source.read()
+        self._controller.observe_packet(packet)
+        return packet
 
     def is_opus(self) -> bool:
         return self._controller.source.is_opus()
@@ -133,6 +162,7 @@ class PreparedAudio:
     owned_resources: tuple[Any, ...] = ()
     memory_bytes: int = 0
     memory_reservation_id: str | None = None
+    confirm_first_packet: bool = False
     _cleanup_controller: _CleanupController = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -141,6 +171,13 @@ class PreparedAudio:
 
     def cleanup(self) -> None:
         self._cleanup_controller.cleanup(report_error=True)
+
+    def set_first_packet_callback(self, callback: Any) -> None:
+        self._cleanup_controller.set_first_packet_callback(callback)
+
+    @property
+    def playback_seconds(self) -> float:
+        return self._cleanup_controller.playback_seconds
 
 
 @dataclass(frozen=True, slots=True)

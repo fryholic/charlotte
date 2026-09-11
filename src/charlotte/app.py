@@ -87,6 +87,7 @@ class CharlotteBot(commands.Bot):
                 name=f"{self.config.command_prefix}help",
             )
         )
+        await self.players.reconcile_voice_states()
         self.log.info(
             "Discord bot ready",
             extra={
@@ -94,6 +95,13 @@ class CharlotteBot(commands.Bot):
                 "guild_count": len(self.guilds),
                 "environment": self.config.environment.value,
             },
+        )
+
+    async def on_resumed(self) -> None:
+        await self.players.reconcile_voice_states()
+        self.log.info(
+            "Discord session resumed",
+            extra={"event": "app.resumed", "guild_count": len(self.guilds)},
         )
 
     def _start_owner_resolution_retry(self) -> None:
